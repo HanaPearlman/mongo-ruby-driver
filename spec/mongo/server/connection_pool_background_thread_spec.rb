@@ -187,33 +187,57 @@ describe Mongo::Server::ConnectionPool do
   end
 
   describe '#close_idle_sockets' do
-    context 'when min size and idle time are provided' do
-      let(:pool) do
-        described_class.new(server, :min_pool_size => 1, :max_idle_time => 1)
+    context 'when max idle time is specified' do
+      context 'when min size is provided' do
+        let(:pool) do
+          described_class.new(server, :min_pool_size => 1, :max_idle_time => 1)
+        end
+
+        it 'repopulates pool after sockets are closes' do
+          pool
+
+          sleep 2
+          expect(pool.size).to eq(1)
+
+          connection = pool.check_out
+          connection.record_checkin!
+          pool.check_in(connection)
+          
+          # let the connection become idle
+          sleep 1
+
+          # force close idle_sockets so it triggers populate, 
+          # and it is unlikely to be because of bg thread timeout
+          pool.close_idle_sockets
+          expect(pool.size).to eq(0)
+
+          # wait for populate to finish
+          sleep 2
+          expect(pool.size).to eq(1)
+          expect(pool.check_out).not_to eq(connection)
+        end
       end
 
-      it 'repopulates pool after sockets are closes' do
-        pool
+      context 'when min size is not provided' do
+        let(:pool) do
+          described_class.new(server, :max_idle_time => 1)
+        end
 
-        sleep 2
-        expect(pool.size).to eq(1)
+        it 'removes the idle connections from the pool' do
+          pool
 
-        connection = pool.check_out
-        connection.record_checkin!
-        pool.check_in(connection)
-        
-        # let the connection become idle
-        sleep 1
+          connection = pool.check_out
+          connection.record_checkin!
+          pool.check_in(connection)
+          expect(pool.size).to eq(1)
 
-        # force close idle_sockets so it triggers populate, 
-        # and it is unlikely to be because of bg thread timeout
-        pool.close_idle_sockets
-        expect(pool.size).to eq(0)
+          # let  the connection become idle
+          sleep 1
 
-        # wait for populate to finish
-        sleep 2
-        expect(pool.size).to eq(1)
-        expect(pool.check_out).not_to eq(connection)
+          pool.close_idle_sockets
+
+          expect(pool.size).to eq(0)
+        end
       end
     end
   end
