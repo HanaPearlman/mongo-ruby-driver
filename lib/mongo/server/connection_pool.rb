@@ -406,7 +406,11 @@ module Mongo
 
       # @since 2.1.0
       # @deprecated
-      alias :disconnect! :clear
+      # alias :disconnect! :clear
+      def disconnect!(options = nil)
+        @populator.stop!
+        clear(options)
+      end
 
       # Marks the pool closed, closes all idle connections in the pool and
       # schedules currently checked out connections to be closed when they are
