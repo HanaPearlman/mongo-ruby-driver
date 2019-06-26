@@ -28,6 +28,7 @@ module Mongo
       def start!
         @thread = Thread.new {
           while !@pool.closed? do
+            @pool.close_idle_sockets
             @pool.populate
             @pool.populate_semaphore.wait(5)
           end

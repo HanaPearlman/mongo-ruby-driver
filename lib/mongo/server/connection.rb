@@ -228,7 +228,7 @@ module Mongo
         end
 
         # for some reason, signaling here is slower
-        @server.pool.populate_semaphore.signal
+        # @server.pool.populate_semaphore.signal
         true
       end
 
