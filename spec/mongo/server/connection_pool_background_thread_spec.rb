@@ -21,18 +21,12 @@ describe Mongo::Server::ConnectionPool do
 
   declare_topology_double
 
-  let(:cluster) do
-    double('cluster').tap do |cl|
-      allow(cl).to receive(:topology).and_return(topology)
-      allow(cl).to receive(:app_metadata).and_return(app_metadata)
-      allow(cl).to receive(:options).and_return({})
-      allow(cl).to receive(:update_cluster_time)
-    end
+  before(:all) do
+    ClientRegistry.instance.close_all_clients
   end
 
-  let(:server) do
-    Mongo::Server.new(address, cluster, monitoring, listeners, server_options)
-  end
+  let(:client) { ClientRegistry.instance.global_client('authorized') }
+  let(:server) { client.cluster.servers.first }
 
   let(:pool) do
     described_class.new(server)
