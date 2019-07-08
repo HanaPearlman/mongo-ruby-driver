@@ -280,8 +280,6 @@ module Mongo
                   @populate_semaphore.signal
                   next
                 end
-
-                @checked_out_connections << connection
                 throw(:done)
               end
 
@@ -292,7 +290,6 @@ module Mongo
                 # but if it did, it would be performing i/o under our lock,
                 # which is bad. Fix in the future.
                 connection = create_connection
-                @checked_out_connections << connection
                 throw(:done)
               end
             end
@@ -308,6 +305,14 @@ module Mongo
               raise Error::ConnectionCheckOutTimeout.new(@server.address, wait_timeout)
             end
             @available_semaphore.wait(wait)
+          end
+        end
+
+        if connection
+          if authenticate_connection(connection)
+            @lock.synchronize do
+              @checked_out_connections << connection
+            end
           end
         end
 
@@ -523,15 +528,48 @@ module Mongo
 
         catch(:done) do
           loop do
+            connection = nil
             @lock.synchronize do
               if !closed? && unsynchronized_size < min_size
-                @available_connections << create_connection
+                connection = create_connection
               else
                 throw(:done)
               end
             end
+
+            if connection
+              if authenticate_connection(connection)
+                # good
+
+                @lock.synchronize do
+                  @available_connections << connection
+                end
+              else
+                # need to try again
+
+              end
+            end
           end
         end
+      end
+
+      # true if the connection is connected, false otherwise
+      def authenticate_connection(connection)
+        begin
+          connection.connect!
+        rescue Exception => e
+          @lock.synchronize do
+            if @available_connections.include?(connection)
+              @available_connections.delete(connection)
+            end
+            if @checked_out_connections.include?(connection)
+              @checked_out_connections.delete(connection)
+            end
+          end
+          return false
+        end
+
+        return true
       end
 
       # Finalize the connection pool for garbage collection.
@@ -559,7 +597,7 @@ module Mongo
         connection = Connection.new(@server, options.merge(generation: generation))
         # CMAP spec requires connections to be returned from the pool
         # fully established.
-        connection.connect!
+        # connection.connect!
         connection
       end
 

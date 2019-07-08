@@ -53,7 +53,7 @@ describe Mongo::Server::ConnectionPool do
       it 'creates the pool with min size connections' do
         # Allow background thread to populate pool
         pool
-        sleep 0.1
+        sleep 1
 
         expect(pool.size).to eq(2)
         expect(pool.available_count).to eq(2)
@@ -735,9 +735,10 @@ describe Mongo::Server::ConnectionPool do
       end
       t.join
 
+      expect(invoked).to be true
       expect(Mongo::Auth).to receive(:get).and_call_original
       expect(pool.check_out).to be_a(Mongo::Server::Connection)
-      expect(invoked).to be true
+
     end
   end
 
