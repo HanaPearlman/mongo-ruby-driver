@@ -559,7 +559,7 @@ module Mongo
         connection = Connection.new(@server, options.merge(generation: generation))
         # CMAP spec requires connections to be returned from the pool
         # fully established.
-        #connection.connect!
+        connection.connect!
         connection
       end
 

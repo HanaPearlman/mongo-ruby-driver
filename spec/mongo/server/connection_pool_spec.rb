@@ -679,6 +679,7 @@ describe Mongo::Server::ConnectionPool do
       it 'does not add the connection to the pool' do
         pending 'Re-enable when connections are connected prior to being returned from check_out method'
 
+        # fails because with_connection raises the SocketError which is not caught anywhere
         allow(pool).to receive(:check_out).and_raise(Mongo::Error::SocketError)
         pool.with_connection { |c| c }
 
@@ -699,6 +700,7 @@ describe Mongo::Server::ConnectionPool do
     end
   end
 
+  # TODO verify modification
   context 'when the connection does not finish authenticating before the thread is killed' do
 
     let!(:pool) do
@@ -706,7 +708,7 @@ describe Mongo::Server::ConnectionPool do
     end
 
     let(:server_options) do
-      { user: SpecConfig.instance.root_user.name, password: SpecConfig.instance.root_user.password }.merge(SpecConfig.instance.test_options).merge(max_pool_size: 1)
+      { user: SpecConfig.instance.root_user.name, password: SpecConfig.instance.root_user.password }.merge(SpecConfig.instance.test_options).merge(min_pool_size: 0, max_pool_size: 1)
     end
 
     before do
@@ -733,7 +735,7 @@ describe Mongo::Server::ConnectionPool do
       end
       t.join
 
-      #expect(Mongo::Auth).to receive(:get).and_call_original
+      expect(Mongo::Auth).to receive(:get).and_call_original
       expect(pool.check_out).to be_a(Mongo::Server::Connection)
       expect(invoked).to be true
     end
