@@ -21,22 +21,34 @@ describe Mongo::Server::ConnectionPool do
 
   declare_topology_double
 
+  # let(:cluster) do
+  #   double('cluster').tap do |cl|
+  #     allow(cl).to receive(:topology).and_return(topology)
+  #     allow(cl).to receive(:app_metadata).and_return(app_metadata)
+  #     allow(cl).to receive(:options).and_return({})
+  #     allow(cl).to receive(:update_cluster_time)
+  #   end
+  # end
+
+  # let(:server) do
+  #   Mongo::Server.new(address, cluster, monitoring, listeners, server_options)
+  # end
   before(:all) do
     ClientRegistry.instance.close_all_clients
   end
 
   let(:client) { ClientRegistry.instance.global_client('authorized') }
-  let(:server) { client.cluster.servers.first }
+  let(:server) { client.cluster.next_primary }
 
   let(:pool) do
-    described_class.new(server)
+    Mongo::Server::ConnectionPool.new(server, server.options)
   end
 
   describe '#initialize' do
     context 'when a min size is provided' do
 
       let(:pool) do
-        described_class.new(server, :min_pool_size => 2)
+        Mongo::Server::ConnectionPool.new(server, server.options.merge(:max_pool_size => 2, :min_pool_size => 2))
       end
 
       it 'creates the pool with min pool size connections' do
@@ -53,10 +65,6 @@ describe Mongo::Server::ConnectionPool do
     end
 
     context 'when min size is zero' do
-      let(:pool) do
-        described_class.new(server)
-      end
-
       it 'does not start the background thread' do
         pool
         sleep 1
@@ -70,7 +78,7 @@ describe Mongo::Server::ConnectionPool do
   describe '#clear' do
     context 'when a min size is provided' do
       let(:pool) do
-        described_class.new(server, :min_pool_size => 1)
+        Mongo::Server::ConnectionPool.new(server, server.options.merge(:min_pool_size => 1))
       end
 
       it 'repopulates the pool periodically only up to min size' do
@@ -104,7 +112,7 @@ describe Mongo::Server::ConnectionPool do
   describe '#check_in' do
     context 'when a min size is provided' do
       let(:pool) do
-        described_class.new(server, :min_pool_size => 1)
+        Mongo::Server::ConnectionPool.new(server, server.options.merge(:min_pool_size => 1))
       end
 
       it 'repopulates the pool after check_in of a closed connection' do
@@ -131,7 +139,7 @@ describe Mongo::Server::ConnectionPool do
     context 'when min size and idle time are provided' do
 
       let(:pool) do
-        described_class.new(server, :min_pool_size => 2, :max_idle_time => 0.5)
+        Mongo::Server::ConnectionPool.new(server, server.options.merge(:max_pool_size => 2, :min_pool_size => 2, :max_idle_time => 0.5))
       end
 
       it 'repopulates the pool after check_out empties idle connections' do
@@ -172,7 +180,7 @@ describe Mongo::Server::ConnectionPool do
     context 'when min size is provided' do
 
       let(:pool) do
-        described_class.new(server, :min_pool_size => 2)
+        Mongo::Server::ConnectionPool.new(server, server.options.merge(:max_pool_size => 2, :min_pool_size => 2))
       end
 
       it 'terminates and does not repopulate the pool after pool is closed' do
@@ -206,7 +214,7 @@ describe Mongo::Server::ConnectionPool do
   describe '#close_idle_sockets' do
     context 'when min size and idle time are provided' do
       let(:pool) do
-        described_class.new(server, :min_pool_size => 1, :max_idle_time => 0.5)
+        Mongo::Server::ConnectionPool.new(server, server.options.merge(:min_pool_size => 1, :max_idle_time => 0.5))
       end
 
       it 'repopulates pool after sockets are closes' do
@@ -240,7 +248,7 @@ describe Mongo::Server::ConnectionPool do
 
       it 'populates the parent and child pools' do
         client = ClientRegistry.instance.new_local_client([SpecConfig.instance.addresses.first],
-          server_options.merge(min_pool_size: 2))
+          server_options.merge(:max_pool_size => 2, min_pool_size: 2))
         # let pool populate
         sleep 1
 
