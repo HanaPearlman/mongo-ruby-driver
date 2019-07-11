@@ -38,7 +38,6 @@ module Mongo
 
       def publish_cmap_event(event)
         return unless monitoring?
-
         monitoring.published(Monitoring::CONNECTION_POOL, event)
       end
 

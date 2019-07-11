@@ -329,7 +329,7 @@ module Mongo
             @checked_out_connections.delete(connection)
           end
           publish_cmap_event(
-            Monitoring::Event::Cmap::ConnectionCheckedOutFailed.new(
+            Monitoring::Event::Cmap::ConnectionCheckOutFailed.new(
               @server.address,
               Monitoring::Event::Cmap::ConnectionCheckOutFailed::CONNECTION_ERROR
             ),
@@ -597,6 +597,7 @@ module Mongo
           return true
         rescue Exception => e
           # TODO close here or elsewhere? what if this errors?
+          # todo reason for disconnect?
           connection.disconnect!
           raise e
         end
