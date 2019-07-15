@@ -53,13 +53,12 @@ describe Mongo::Server::ConnectionPool do
   end
 
   let(:pool) do
-    described_class.new(server, server_options)
+    @pool = described_class.new(server, server_options)
   end
 
   after do
-    # todo change so we don't create a pool if one was not created already
-    if pool
-      pool.close(:force => true)
+    if @pool
+      @pool.close(:force => true)
     end
   end
 
@@ -305,7 +304,7 @@ describe Mongo::Server::ConnectionPool do
 
   describe '#check_in' do
     let!(:pool) do
-      server.pool
+      @pool = server.pool
     end
 
     after do
@@ -416,7 +415,7 @@ describe Mongo::Server::ConnectionPool do
     end
 
     let!(:pool) do
-      server.pool
+      @pool = server.pool
     end
 
     context 'when a connection is checked out on a different thread' do
@@ -527,12 +526,12 @@ describe Mongo::Server::ConnectionPool do
     end
 
     context 'when connection set up throws an error during check out' do
-      let!(:pool) do
-        client.cluster.next_primary.pool
-      end
-
       let(:client) do
         new_local_client(SpecConfig.instance.addresses, authorized_client.options.merge(options))
+      end
+
+      let!(:pool) do
+        @pool = client.cluster.next_primary.pool
       end
 
       before do
@@ -547,17 +546,15 @@ describe Mongo::Server::ConnectionPool do
         subscriber.clear_events!
         expect(Mongo::Auth).to receive(:get).and_raise(Mongo::Error)
         expect { pool.check_out }.to raise_error(Mongo::Error)
-        expect(pool.size).to be(0)
+        expect(pool.size).to eq(0)
 
-        # todo there are a lot of other events here-- should there be more selection?
-        # should we connect to a client this way? More of an integration test
         expect(subscriber.published_events)
-        connection_failed_events = subscriber.published_events.select do |event|
+        checkout_failed_events = subscriber.published_events.select do |event|
           event.is_a?(Mongo::Monitoring::Event::Cmap::ConnectionCheckOutFailed)
         end
-        expect(connection_failed_events).not_to be_empty
+        expect(checkout_failed_events.size).to eq(1)
+        expect(checkout_failed_events.first.reason).to be(:connection_error)
       end
-
     end
   end
 
@@ -604,7 +601,7 @@ describe Mongo::Server::ConnectionPool do
 
     context 'min size is 0' do
       let(:pool) do
-        create_pool(0)
+        @pool = create_pool(0)
       end
 
       it_behaves_like 'disconnects and removes all connections in the pool and bumps generation'
@@ -612,7 +609,7 @@ describe Mongo::Server::ConnectionPool do
 
     context 'min size is not 0' do
       let(:pool) do
-        create_pool(1)
+        @pool = create_pool(1)
       end
 
       it_behaves_like 'disconnects and removes all connections in the pool and bumps generation'
@@ -658,7 +655,7 @@ describe Mongo::Server::ConnectionPool do
     let(:options) { {min_pool_size: 3, max_pool_size: 7, wait_timeout: 9, wait_queue_timeout: 9} }
 
     let!(:pool) do
-      server.pool
+      @pool = server.pool
     end
 
     after do
@@ -714,7 +711,7 @@ describe Mongo::Server::ConnectionPool do
 
   describe '#with_connection' do
     let!(:pool) do
-      server.pool
+      @pool = server.pool
     end
 
     context 'when a connection cannot be checked out' do
@@ -746,7 +743,7 @@ describe Mongo::Server::ConnectionPool do
   # TODO verify modification.
   context 'when the connection does not finish authenticating before the thread is killed' do
     let!(:pool) do
-      server.pool
+      @pool = server.pool
     end
 
     let(:options) do
@@ -777,7 +774,7 @@ describe Mongo::Server::ConnectionPool do
 
   describe '#close_idle_sockets' do
     let!(:pool) do
-      server.pool
+      @pool = server.pool
     end
 
     context 'when there is a max_idle_time specified' do
