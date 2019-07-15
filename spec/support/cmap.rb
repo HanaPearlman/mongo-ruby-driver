@@ -33,6 +33,8 @@ module Mongo
       # @return [ EventSubscriber ] subscriber The subscriber receiving the CMAP events.
       attr_reader :subscriber
 
+      attr_reader :server
+
       # Instantiate the new spec.
       #
       # @example Create the spec.
@@ -53,19 +55,8 @@ module Mongo
         preprocess
       end
 
-      def setup(cluster)
-        @subscriber = EventSubscriber.new
-
-        monitoring = Mongo::Monitoring.new(monitoring: false)
-        monitoring.subscribe(Mongo::Monitoring::CONNECTION_POOL, subscriber)
-
-        server = Mongo::Server.new(
-            Address.new(SpecConfig.instance.addresses.first),
-            cluster,
-            monitoring,
-            Mongo::Event::Listeners.new,
-            pool_options.merge(monitoring_io: false))
-
+      def setup(server, subscriber)
+        @subscriber = subscriber
         @pool = server.pool
 
         # let pool populate

@@ -24,6 +24,8 @@ def define_transactions_spec_tests(test_paths)
     spec = Mongo::Transactions::Spec.new(file)
 
     context(spec.description) do
+      require_wired_tiger
+
       define_spec_tests_with_requirements(spec) do |req|
         spec.tests.each do |test|
 
@@ -31,6 +33,12 @@ def define_transactions_spec_tests(test_paths)
             if test.multiple_mongoses?
               unless SpecConfig.instance.addresses.length > 1
                 skip "Test requires multiple mongoses"
+              end
+            else
+              # Many transaction spec tests that do not specifically deal with
+              # sharded transactions fail when run against a multi-mongos cluster
+              if SpecConfig.instance.addresses.length > 1
+                skip "Test does not specify multiple mongoses"
               end
             end
           end

@@ -1,4 +1,4 @@
-require 'lite_spec_helper'
+require 'spec_helper'
 
 describe 'Cmap' do
 
@@ -9,6 +9,9 @@ describe 'Cmap' do
       allow(cl).to receive(:topology).and_return(topology)
       allow(cl).to receive(:options).and_return({})
       allow(cl).to receive(:app_metadata).and_return(Mongo::Server::AppMetadata.new({}))
+      allow(cl).to receive(:run_sdam_flow)
+      allow(cl).to receive(:update_cluster_time)
+      allow(cl).to receive(:cluster_time).and_return(nil)
     end
   end
 
@@ -16,8 +19,33 @@ describe 'Cmap' do
     spec = Mongo::Cmap::Spec.new(file)
 
     context("#{spec.description} (#{file.sub(%r'.*/data/cmap/', '')})") do
+      let(:options) do
+        default_opts = SpecConfig.instance.test_options.dup
+        default_opts.delete(:max_pool_size)
+        default_opts.delete(:wait_queue_timeout)
+        default_opts.delete(:connect_timeout)
+        default_opts.delete(:max_idle_time)
+        default_opts.merge(spec.pool_options).merge(monitoring_io: false).merge(SpecConfig.instance.auth_options)
+      end
+
       before do
-        spec.setup(cluster)
+        subscriber = EventSubscriber.new
+
+        monitoring = Mongo::Monitoring.new(monitoring: false)
+        monitoring.subscribe(Mongo::Monitoring::CONNECTION_POOL, subscriber)
+
+        server = register_server(
+          Mongo::Server.new(
+            Mongo::Address.new(SpecConfig.instance.addresses.first),
+            cluster,
+            monitoring,
+            Mongo::Event::Listeners.new,
+            options
+          ).tap do |server|
+            allow(server).to receive(:description).and_return(ClusterConfig.instance.primary_description)
+          end
+        )
+        spec.setup(server, subscriber)
       end
 
       let!(:result) do
