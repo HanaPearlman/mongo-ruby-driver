@@ -25,7 +25,6 @@ describe 'Cmap' do
     spec = Mongo::Cmap::Spec.new(file)
 
     context("#{spec.description} (#{file.sub(%r'.*/data/cmap/', '')})") do
-
       before do
         subscriber = EventSubscriber.new
         monitoring = Mongo::Monitoring.new(monitoring: false)
