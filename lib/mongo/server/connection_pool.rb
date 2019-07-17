@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-require 'mongo/server/connection_pool/connection_pool_populator'
+require 'mongo/server/connection_pool/populator'
 
 module Mongo
   class Server
@@ -122,7 +122,7 @@ module Mongo
 
         # Background thread reponsible for maintaining the size of
         # the pool to at least min_size
-        @populator = ConnectionPoolPopulator.new(self)
+        @populator = Populator.new(self)
         @populate_semaphore = Semaphore.new
 
         ObjectSpace.define_finalizer(self, self.class.finalize(@available_connections, @pending_connections, @populator))
@@ -281,6 +281,7 @@ module Mongo
                   # method, but if any don't, check again here
                   connection.disconnect!(reason: :stale)
                   @populate_semaphore.signal
+                  # SHOULD we signal here?
                   next
                 end
 
@@ -292,7 +293,7 @@ module Mongo
                   next
                 end
 
-                @checked_out_connections << connection
+                @pending_connections << connection
                 throw(:done)
               end
 
@@ -300,7 +301,7 @@ module Mongo
               # holds.
               if unsynchronized_size < max_size
                 connection = create_connection
-                @checked_out_connections << connection
+                @pending_connections << connection
                 throw(:done)
               end
             end
@@ -322,10 +323,11 @@ module Mongo
         begin
           connect_connection(connection)
         rescue Exception => e
-          # Authentication failed
+          # Handshake or authentication failed
           @lock.synchronize do
-            @checked_out_connections.delete(connection)
+            @pending_connections.delete(connection)
           end
+          @populate_semaphore.signal
 
           publish_cmap_event(
             Monitoring::Event::Cmap::ConnectionCheckOutFailed.new(
@@ -334,6 +336,11 @@ module Mongo
             ),
           )
           raise e
+        end
+
+        @lock.synchronize do
+          @checked_out_connections << connection
+          @pending_connections.delete(connection)
         end
 
         publish_cmap_event(
@@ -446,7 +453,9 @@ module Mongo
 
         options ||= {}
 
-        stop_populator(options[:wait])
+        # for now, this always waits for the background thread to finish running;
+        # may be changed
+        stop_populator
 
         @lock.synchronize do
           until @available_connections.empty?
@@ -573,6 +582,10 @@ module Mongo
               end
 
               if retried
+                # wake up one thread waiting for connections, since one could not
+                # be created here, and can instead be created in flow
+                @available_semaphore.signal
+
                 return false
               end
               retried = true
@@ -594,12 +607,18 @@ module Mongo
       end
 
       # Stop the background populator thread and clean up any connections created
-      # by the thread which have not been connected yet.
+      # which have not been connected yet.
+      #
+      # Used when closing the pool or when terminating the bg thread for testing
+      # purposes. In the latter case, this method must be called before the pool
+      # is used, to ensure no connections in pending_connections were created in-flow
+      # by the check_out method.
       #
       # @option [ true | false ] wait Wait for background thread to exit before
       # terminating.
-      def stop_populator(wait = false)
-        @populator.stop!(wait)
+      # @api private
+      def stop_populator
+        @populator.stop!(true)
 
         @lock.synchronize do
           # If stop_populator is called while populate is running, there may be
