@@ -503,13 +503,13 @@ describe Mongo::Server::ConnectionPool do
         new_local_client(SpecConfig.instance.addresses, authorized_client.options.merge(options))
       end
 
-      let!(:pool) do
+      let(:pool) do
         client.cluster.next_primary.pool
       end
 
       before do
-        pool
         ClientRegistry.instance.close_all_clients
+        pool
       end
 
       it 'raises an error and emits ConnectionCheckOutFailedEvent' do
