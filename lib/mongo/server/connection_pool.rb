@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-require 'mongo/server/connection_pool/populator'
+require 'mongo/server/connection_pool/connection_pool_populator'
 
 module Mongo
   class Server
@@ -122,7 +122,7 @@ module Mongo
 
         # Background thread reponsible for maintaining the size of
         # the pool to at least min_size
-        @populator = Populator.new(self)
+        @populator = ConnectionPoolPopulator.new(self)
         @populate_semaphore = Semaphore.new
 
         ObjectSpace.define_finalizer(self, self.class.finalize(@available_connections, @pending_connections, @populator))
@@ -281,7 +281,6 @@ module Mongo
                   # method, but if any don't, check again here
                   connection.disconnect!(reason: :stale)
                   @populate_semaphore.signal
-                  # SHOULD we signal here?
                   next
                 end
 
@@ -322,7 +321,7 @@ module Mongo
 
         begin
           connect_connection(connection)
-        rescue Exception => e
+        rescue Exception
           # Handshake or authentication failed
           @lock.synchronize do
             @pending_connections.delete(connection)
@@ -335,7 +334,7 @@ module Mongo
               Monitoring::Event::Cmap::ConnectionCheckOutFailed::CONNECTION_ERROR
             ),
           )
-          raise e
+          raise
         end
 
         @lock.synchronize do
@@ -453,8 +452,6 @@ module Mongo
 
         options ||= {}
 
-        # for now, this always waits for the background thread to finish running;
-        # may be changed
         stop_populator
 
         @lock.synchronize do
@@ -547,65 +544,6 @@ module Mongo
         end
       end
 
-      # Create and add connections to the pool until the
-      # pool size is at least min_size. Terminates if two connections
-      # encounter errors (in a row) while authenticating.
-      #
-      # Used by the pool populator background thread.
-      #
-      # @return [ true | false ] True if populate ran to completion, false if it
-      # terminated because of errors encountered while connecting connections.
-      #
-      # @api private
-      def populate
-        raise_if_closed!
-
-        catch(:done) do
-          retried = false
-
-          loop do
-            connection = nil
-            @lock.synchronize do
-              if !closed? && unsynchronized_size < min_size
-                connection = create_connection
-                @pending_connections << connection
-              else
-                throw(:done)
-              end
-            end
-
-            begin
-              connect_connection(connection)
-            rescue Exception => e
-              @lock.synchronize do
-                @pending_connections.delete(connection)
-              end
-
-              if retried
-                # wake up one thread waiting for connections, since one could not
-                # be created here, and can instead be created in flow
-                @available_semaphore.signal
-
-                return false
-              end
-              retried = true
-              next
-            end
-
-            retried = false
-            @lock.synchronize do
-              @available_connections << connection
-              @pending_connections.delete(connection)
-
-              # wake up one thread waiting for connections, since one was created
-              @available_semaphore.signal
-            end
-          end
-        end
-
-        true
-      end
-
       # Stop the background populator thread and clean up any connections created
       # which have not been connected yet.
       #
@@ -614,11 +552,9 @@ module Mongo
       # is used, to ensure no connections in pending_connections were created in-flow
       # by the check_out method.
       #
-      # @option [ true | false ] wait Wait for background thread to exit before
-      # terminating.
       # @api private
       def stop_populator
-        @populator.stop!(true)
+        @populator.stop!
 
         @lock.synchronize do
           # If stop_populator is called while populate is running, there may be
@@ -633,6 +569,37 @@ module Mongo
         end
       end
 
+      # Creates and adds a connection to the pool, if the pool's size is below
+      # min_size. Retries once if an error is encountered during this process
+      # and raises if a second error occurs.
+      #
+      # Used by the pool populator background thread.
+      #
+      # @return [ true | false ] Whether this method should be called again
+      #   to create more connections.
+      # @raise [ Mongo::Error ] The second error raised if a retry occured
+      #
+      # @api private
+      def populate
+        return false if closed?
+
+        begin
+          return create_and_add_connection
+        rescue Exception
+          # an error was encountered while connecting the connection,
+          # ignore this first error and try again.
+        end
+
+        begin
+          return create_and_add_connection
+        rescue Exception
+          # wake up one thread waiting for connections, since one could not
+          # be created here, and can instead be created in flow
+          @available_semaphore.signal
+          raise
+        end
+      end
+
       # Finalize the connection pool for garbage collection.
       #
       # @param [ List<Mongo::Connection> ] available_connections The available connections.
@@ -642,7 +609,7 @@ module Mongo
       # @return [ Proc ] The Finalizer.
       def self.finalize(available_connections, pending_connections, populator)
         proc do
-          populator.stop!(true)
+          populator.stop!
 
           available_connections.each do |connection|
             connection.disconnect!(reason: :pool_closed)
@@ -666,6 +633,43 @@ module Mongo
         Connection.new(@server, options.merge(generation: generation))
       end
 
+      # Create a connection, connect it, and add it to the pool.
+      #
+      # @return [ true | false ] True if a connection was created and
+      #    added to the pool, false otherwise
+      # @raise [ Mongo::Error ] An error encountered during connection connect
+      def create_and_add_connection
+        connection = nil
+
+        @lock.synchronize do
+          if !closed? && unsynchronized_size < min_size
+            connection = create_connection
+            @pending_connections << connection
+          else
+            return false
+          end
+        end
+
+        begin
+          connect_connection(connection)
+        rescue Exception
+          @lock.synchronize do
+            @pending_connections.delete(connection)
+          end
+          raise
+        end
+
+        @lock.synchronize do
+          @available_connections << connection
+          @pending_connections.delete(connection)
+
+          # wake up one thread waiting for connections, since one was created
+          @available_semaphore.signal
+        end
+
+        true
+      end
+
       # Asserts that the pool has not been closed.
       #
       # @raise [ Error::PoolClosedError ] If the pool has been closed.
@@ -682,9 +686,9 @@ module Mongo
       def connect_connection(connection)
         begin
           connection.connect!
-        rescue Exception => e
+        rescue Exception
           connection.disconnect!(reason: :error)
-          raise e
+          raise
         end
       end
     end
