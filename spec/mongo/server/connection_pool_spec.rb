@@ -517,7 +517,7 @@ describe Mongo::Server::ConnectionPool do
         client.subscribe(Mongo::Monitoring::CONNECTION_POOL, subscriber)
 
         subscriber.clear_events!
-        expect(Mongo::Auth).to receive(:get).and_raise(Mongo::Error)
+        expect(Mongo::Auth).to receive(:get).at_least(:once).and_raise(Mongo::Error)
         expect { pool.check_out }.to raise_error(Mongo::Error)
         expect(pool.size).to eq(0)
 
