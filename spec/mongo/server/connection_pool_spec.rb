@@ -28,11 +28,18 @@ describe Mongo::Server::ConnectionPool do
       allow(cl).to receive(:app_metadata).and_return(app_metadata)
       allow(cl).to receive(:options).and_return({})
       allow(cl).to receive(:update_cluster_time)
+      allow(cl).to receive(:run_sdam_flow)
     end
   end
 
   let(:server) do
-    Mongo::Server.new(address, cluster, monitoring, listeners, server_options)
+    register_server(
+      Mongo::Server.new(address, cluster, monitoring, listeners,
+        {monitoring_io: false}.update(server_options)
+      ).tap do |server|
+        allow(server).to receive(:description).and_return(ClusterConfig.instance.primary_description)
+      end
+    )
   end
 
   let(:pool) do
@@ -40,6 +47,9 @@ describe Mongo::Server::ConnectionPool do
   end
 
   describe '#initialize' do
+    after do
+      pool.close(:force => true)
+    end
 
     context 'when a min size is provided' do
 
@@ -47,9 +57,13 @@ describe Mongo::Server::ConnectionPool do
         described_class.new(server, :min_pool_size => 2)
       end
 
-      it 'creates the pool with no connections' do
-        expect(pool.size).to eq(0)
-        expect(pool.available_count).to eq(0)
+      it 'creates the pool with min size connections' do
+        # Allow background thread to populate pool
+        pool
+        sleep 0.1
+
+        expect(pool.size).to eq(2)
+        expect(pool.available_count).to eq(2)
       end
 
       it 'does not use the same objects in the pool' do
@@ -509,6 +523,9 @@ describe Mongo::Server::ConnectionPool do
 
     def create_pool(min_pool_size)
       described_class.new(server, max_pool_size: 3, min_pool_size: min_pool_size).tap do |pool|
+        # kill background thread to test disconnect behavior
+        pool.populator.stop!
+
         # make pool be of size 2 so that it has enqueued connections
         # when told to disconnect
         c1 = pool.check_out
@@ -555,6 +572,10 @@ describe Mongo::Server::ConnectionPool do
     context 'min size is not 0' do
       let(:pool) do
         create_pool(1)
+      end
+
+      after do
+        pool.close(:force => true)
       end
 
       it_behaves_like 'disconnects and removes all connections in the pool and bumps generation'
@@ -606,6 +627,7 @@ describe Mongo::Server::ConnectionPool do
     after do
       expect(server).to receive(:pool).and_return(pool)
       server.disconnect!
+      pool.close # this will no longer be needed after server disconnect kills bg thread
     end
 
     it 'includes the object id' do
@@ -625,7 +647,7 @@ describe Mongo::Server::ConnectionPool do
     end
 
     it 'includes the current size' do
-      expect(pool.inspect).to include('current_size=0')
+      expect(pool.inspect).to include('current_size=')
     end
 
 =begin obsolete
@@ -782,6 +804,15 @@ describe Mongo::Server::ConnectionPool do
         end
 
         context 'when min size is > 0' do
+          before do
+            # Kill background thread to test close_idle_socket behavior
+            pool.populator.stop!
+          end
+
+          after do
+            pool.close(:force => true)
+          end
+
           context 'when more than the number of min_size are checked out' do
             let(:options) do
               {max_pool_size: 5, min_pool_size: 3, max_idle_time: 0.5}
@@ -897,13 +928,15 @@ describe Mongo::Server::ConnectionPool do
         conn
       end
 
-      before do
-        expect(connection).not_to receive(:disconnect!)
-        pool.close_idle_sockets
-      end
-
       it 'does not close any sockets' do
-        expect(connection.connected?).to be(true)
+        # Since per-test cleanup will close the pool and disconnect
+        # the connection, we need to explicitly define the scope for the
+        # assertions
+        RSpec::Mocks.with_temporary_scope do
+          expect(connection).not_to receive(:disconnect!)
+          pool.close_idle_sockets
+          expect(connection.connected?).to be(true)
+        end
       end
     end
   end

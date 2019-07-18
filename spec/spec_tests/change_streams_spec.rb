@@ -1,6 +1,7 @@
 require 'spec_helper'
 
 describe 'ChangeStreams' do
+  require_wired_tiger
 
   CHANGE_STREAMS_TESTS.each do |file|
 
@@ -29,7 +30,7 @@ describe 'ChangeStreams' do
             expect(result[:result]).to match_result(test)
           end
 
-          it 'has the correct command_started events' do
+          it 'has the correct command_started events', if: test.expectations do
             expect(result[:events]).to match_commands(test)
           end
         end

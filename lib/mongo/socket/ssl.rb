@@ -135,8 +135,19 @@ module Mongo
           if context.respond_to?(:renegotiation_cb=)
             # Disable renegotiation for older Ruby versions per the sample code at
             # https://rubydocs.org/d/ruby-2-6-0/classes/OpenSSL/SSL/SSLContext.html
+            # In JRuby we must allow one call as this callback is invoked for
+            # the initial connection also, not just for renegotiations -
+            # https://github.com/jruby/jruby-openssl/issues/180
+            if BSON::Environment.jruby?
+              allowed_calls = 1
+            else
+              allowed_calls = 0
+            end
             context.renegotiation_cb = lambda do |ssl|
-              raise RuntimeError, 'Client renegotiation disabled'
+              if allowed_calls <= 0
+                raise RuntimeError, 'Client renegotiation disabled'
+              end
+              allowed_calls -= 1
             end
           end
 
@@ -160,33 +171,90 @@ module Mongo
       end
 
       def set_cert(context, options)
+        # Since we clear cert_text during processing, we need to examine
+        # ssl_cert_object here to avoid considering it if we have also
+        # processed the text.
         if options[:ssl_cert]
-          context.cert = OpenSSL::X509::Certificate.new(File.open(options[:ssl_cert]))
-        elsif options[:ssl_cert_string]
-          context.cert = OpenSSL::X509::Certificate.new(options[:ssl_cert_string])
-        elsif options[:ssl_cert_object]
-          context.cert = options[:ssl_cert_object]
+          cert_text = File.read(options[:ssl_cert])
+          cert_object = nil
+        elsif cert_text = options[:ssl_cert_string]
+          cert_object = nil
+        else
+          cert_object = options[:ssl_cert_object]
+        end
+
+        # The client certificate may be a single certificate or a bundle
+        # (client certificate followed by intermediate certificates).
+        # The text may also include private keys for the certificates.
+        # OpenSSL supports passing the entire bundle as a certificate chain
+        # to the context via SSL_CTX_use_certificate_chain_file, but the
+        # Ruby openssl extension does not currently expose this functionality
+        # per https://github.com/ruby/openssl/issues/254.
+        # Therefore, extract the individual certificates from the certificate
+        # text, and if there is more than one certificate provided, use
+        # extra_chain_cert option to add the intermediate ones. This
+        # implementation is modeled after
+        # https://github.com/venuenext/ruby-kafka/commit/9495f5daf254b43bc88062acad9359c5f32cb8b5.
+        # Note that the parsing here is not identical to what OpenSSL employs -
+        # for instance, if there is no newline between two certificates
+        # this code will extract them both but OpenSSL fails in this situation.
+        if cert_text
+          certs = cert_text.scan(/-----BEGIN CERTIFICATE-----(?:.|\n)+?-----END CERTIFICATE-----/)
+          if certs.length > 1
+            context.cert = OpenSSL::X509::Certificate.new(certs.shift)
+            context.extra_chain_cert = certs.map do |cert|
+              OpenSSL::X509::Certificate.new(cert)
+            end
+            # All certificates are already added to the context, skip adding
+            # them again below.
+            cert_text = nil
+          end
+        end
+
+        if cert_text
+          context.cert = OpenSSL::X509::Certificate.new(cert_text)
+        elsif cert_object
+          context.cert = cert_object
         end
       end
 
       def set_key(context, options)
         passphrase = options[:ssl_key_pass_phrase]
         if options[:ssl_key]
-          context.key = passphrase ? OpenSSL::PKey.read(File.open(options[:ssl_key]), passphrase) :
-            OpenSSL::PKey.read(File.open(options[:ssl_key]))
+          context.key = load_private_key(File.read(options[:ssl_key]), passphrase)
         elsif options[:ssl_key_string]
-          context.key = passphrase ? OpenSSL::PKey.read(options[:ssl_key_string], passphrase) :
-            OpenSSL::PKey.read(options[:ssl_key_string])
+          context.key = load_private_key(options[:ssl_key_string], passphrase)
         elsif options[:ssl_key_object]
           context.key = options[:ssl_key_object]
         end
+      end
+
+      def load_private_key(text, passphrase)
+        args = if passphrase
+          [text, passphrase]
+        else
+          [text]
+        end
+        # On JRuby, PKey.read does not grok cert+key bundles.
+        # https://github.com/jruby/jruby-openssl/issues/176
+        if BSON::Environment.jruby?
+          [OpenSSL::PKey::RSA, OpenSSL::PKey::DSA].each do |cls|
+            begin
+              return cls.send(:new, *args)
+            rescue OpenSSL::PKey::PKeyError
+              # ignore
+            end
+          end
+          # Neither RSA nor DSA worked, fall through to trying PKey
+        end
+        OpenSSL::PKey.send(:read, *args)
       end
 
       def set_cert_verification(context, options)
         context.verify_mode = OpenSSL::SSL::VERIFY_PEER
         cert_store = OpenSSL::X509::Store.new
         if options[:ssl_ca_cert]
-          cert_store.add_cert(OpenSSL::X509::Certificate.new(File.open(options[:ssl_ca_cert])))
+          cert_store.add_file(options[:ssl_ca_cert])
         elsif options[:ssl_ca_cert_string]
           cert_store.add_cert(OpenSSL::X509::Certificate.new(options[:ssl_ca_cert_string]))
         elsif options[:ssl_ca_cert_object]

@@ -18,8 +18,8 @@ describe 'SDAM Monitoring' do
           client.subscribe(Mongo::Monitoring::TOPOLOGY_OPENING, @subscriber)
           client.subscribe(Mongo::Monitoring::TOPOLOGY_CHANGED, @subscriber)
         end
-        @client = Mongo::Client.new(spec.uri_string,
-          sdam_proc: sdam_proc, monitoring_io: false,
+        @client = new_local_client_nmio(spec.uri_string,
+          sdam_proc: sdam_proc,
           heartbeat_frequency: 100, connect_timeout: 0.1)
         # We do not want to create servers when an event referencing them
         # is processed, because this may result in server duplication
@@ -29,11 +29,17 @@ describe 'SDAM Monitoring' do
         @servers_cache = {}
         @client.cluster.servers_list.each do |server|
           @servers_cache[server.address.to_s] = server
+
+          # Since we set monitoring_io: false, servers are not monitored
+          # by the cluster. Start monitoring on them manually (this publishes
+          # the server opening event but, again due to monitoring_io being
+          # false, does not do network I/O or change server status)>
+          server.start_monitoring
         end
       end
 
       after(:all) do
-        @client.close
+        @client.close(true)
       end
 
       spec.phases.each_with_index do |phase, phase_index|
@@ -57,8 +63,7 @@ describe 'SDAM Monitoring' do
               result['maxWireVersion'] ||= 0
               new_description = Mongo::Server::Description.new(
                 server.description.address, result, 0.5)
-              publisher = SdamSpecEventPublisher.new(@client.cluster.send(:event_listeners))
-              publisher.publish(Mongo::Event::DESCRIPTION_CHANGED, server.description, new_description)
+              @client.cluster.run_sdam_flow(server.description, new_description)
             end
             @subscriber.phase_finished(phase_index)
           end

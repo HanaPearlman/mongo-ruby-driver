@@ -41,16 +41,19 @@ module Mongo
     # The constant for the writeErrors array.
     #
     # @since 2.0.0
+    # @deprecated
     WRITE_ERRORS = 'writeErrors'.freeze
 
     # The constant for a write concern error.
     #
     # @since 2.0.0
+    # @deprecated
     WRITE_CONCERN_ERROR = 'writeConcernError'.freeze
 
     # The constant for write concern errors.
     #
     # @since 2.1.0
+    # @deprecated
     WRITE_CONCERN_ERRORS = 'writeConcernErrors'.freeze
 
     # Constant for an unknown error.
@@ -85,17 +88,19 @@ module Mongo
     # manually retried by the user.
     #
     # @since 2.6.0
+    # @deprecated
     UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL = 'UnknownTransactionCommitResult'.freeze
 
     # Error label describing errors that will likely not occur if a transaction is manually retried
     # from the start.
     #
     # @since 2.6.0
+    # @deprecated
     TRANSIENT_TRANSACTION_ERROR_LABEL = 'TransientTransactionError'.freeze
 
     def initialize(msg = nil)
-      @labels ||= []
-      super(msg)
+      super
+      @labels = []
     end
 
     # Does the error have the given label?
@@ -124,8 +129,12 @@ module Mongo
       @labels.dup
     end
 
-    private
-
+    # Adds the specified label to the error instance, if the label is not
+    # already in the set of labels.
+    #
+    # @param [ String ] label The label to add.
+    #
+    # @api private
     def add_label(label)
       @labels << label unless label?(label)
     end

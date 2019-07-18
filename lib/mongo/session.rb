@@ -30,25 +30,184 @@ module Mongo
     include Loggable
     include ClusterTime::Consumer
 
-    # Get the options for this session.
+    # Initialize a Session.
+    #
+    # @note Applications should use Client#start_session to begin a session.
+    #
+    # @example
+    #   Session.new(server_session, client, options)
+    #
+    # @param [ ServerSession ] server_session The server session this session is associated with.
+    # @param [ Client ] client The client through which this session is created.
+    # @param [ Hash ] options The options for this session.
+    #
+    # @option options [ true|false ] :causal_consistency Whether to enable
+    #   causal consistency for this session.
+    # @option options [ Hash ] :default_transaction_options Options to pass
+    #   to start_transaction by default, can contain any of the options that
+    #   start_transaction accepts.
+    # @option options [ true|false ] :implicit For internal driver use only -
+    #   specifies whether the session is implicit.
+    # @option options [ Hash ] :read_preference The read preference options hash,
+    #   with the following optional keys:
+    #   - *:mode* -- the read preference as a string or symbol; valid values are
+    #     *:primary*, *:primary_preferred*, *:secondary*, *:secondary_preferred*
+    #     and *:nearest*.
+    #
+    # @since 2.5.0
+    # @api private
+    def initialize(server_session, client, options = {})
+      @server_session = server_session
+      options = options.dup
+
+      @client = client.use(:admin)
+      @options = options.freeze
+      @cluster_time = nil
+      @state = NO_TRANSACTION_STATE
+    end
+
+    # @return [ Hash ] The options for this session.
     #
     # @since 2.5.0
     attr_reader :options
 
-    # Get the client through which this session was created.
+    # @return [ Client ] The client through which this session was created.
     #
     # @since 2.5.1
     attr_reader :client
 
-    # The latest seen operation time for this session.
+    def cluster
+      @client.cluster
+    end
+
+    # @return [ BSON::Timestamp ] The latest seen operation time for this session.
     #
     # @since 2.5.0
     attr_reader :operation_time
 
-    # The options for the transaction currently being executed on the session.
+    # @return [ Hash ] The options for the transaction currently being executed
+    # on this session.
     #
     # @since 2.6.0
     attr_reader :txn_options
+
+    # Is this session an implicit one (not user-created).
+    #
+    # @example Is the session implicit?
+    #   session.implicit?
+    #
+    # @return [ true, false ] Whether this session is implicit.
+    #
+    # @since 2.5.1
+    def implicit?
+      @implicit ||= !!(@options.key?(:implicit) && @options[:implicit] == true)
+    end
+
+    # Is this session an explicit one (i.e. user-created).
+    #
+    # @example Is the session explicit?
+    #   session.explicit?
+    #
+    # @return [ true, false ] Whether this session is explicit.
+    #
+    # @since 2.5.2
+    def explicit?
+      !implicit?
+    end
+
+    # Whether reads executed with this session can be retried according to
+    # the modern retryable reads specification.
+    #
+    # If this method returns true, the modern retryable reads have been
+    # requested by the application. If the server selected for a read operation
+    # supports modern retryable reads, they will be used for that particular
+    # operation. If the server selected for a read operation does not support
+    # modern retryable reads, the read will not be retried.
+    #
+    # If this method returns false, legacy retryable reads have been requested
+    # by the application. Legacy retryable read logic will be used regardless
+    # of server version of the server(s) that the client is connected to.
+    # The number of read retries is given by :max_read_retries client option,
+    # which is 1 by default and can be set to 0 to disable legacy read retries.
+    #
+    # @api private
+    def retry_reads?
+      client.options[:retry_reads] != false
+    end
+
+    # Will writes executed with this session be retried.
+    #
+    # @example Will writes be retried.
+    #   session.retry_writes?
+    #
+    # @return [ true, false ] If writes will be retried.
+    #
+    # @note Retryable writes are only available on server versions at least 3.6
+    #   and with sharded clusters or replica sets.
+    #
+    # @since 2.5.0
+    def retry_writes?
+      !!client.options[:retry_writes] && (cluster.replica_set? || cluster.sharded?)
+    end
+
+    # Get the read preference the session will use in the currently
+    # active transaction.
+    #
+    # This is a driver style hash with underscore keys.
+    #
+    # @example Get the transaction's read preference
+    #   session.txn_read_preference
+    #
+    # @return [ Hash ] The read preference of the transaction.
+    #
+    # @since 2.6.0
+    def txn_read_preference
+      rp = txn_options && txn_options[:read] ||
+        @client.read_preference
+      Mongo::Lint.validate_underscore_read_preference(rp)
+      rp
+    end
+
+    # Whether this session has ended.
+    #
+    # @example
+    #   session.ended?
+    #
+    # @return [ true, false ] Whether the session has ended.
+    #
+    # @since 2.5.0
+    def ended?
+      @server_session.nil?
+    end
+
+    # Get the server session id of this session, if the session was not ended.
+    # If the session was ended, returns nil.
+    #
+    # @example Get the session id.
+    #   session.session_id
+    #
+    # @return [ BSON::Document ] The server session id.
+    #
+    # @since 2.5.0
+    def session_id
+      if ended?
+        raise Error::SessionEnded
+      end
+
+      @server_session.session_id
+    end
+
+    # @return [ Server | nil ] The server (which should be a mongos) that this
+    #   session is pinned to, if any.
+    #
+    # @api private
+    attr_reader :pinned_server
+
+    # @return [ BSON::Document | nil ] Recovery token for the sharded
+    #   transaction being executed on this session, if any.
+    #
+    # @api private
+    attr_accessor :recovery_token
 
     # Error message indicating that the session was retrieved from a client with a different cluster than that of the
     # client through which it is currently being used.
@@ -97,52 +256,11 @@ module Mongo
     # @since 2.6.0
     TRANSACTION_ABORTED_STATE = :transaction_aborted
 
+    # @api private
     UNLABELED_WRITE_CONCERN_CODES = [
       79,  # UnknownReplWriteConcern
       100, # CannotSatisfyWriteConcern,
     ].freeze
-
-    # Initialize a Session.
-    #
-    # @note Applications should use Client#start_session to begin a session.
-    #
-    # @example
-    #   Session.new(server_session, client, options)
-    #
-    # @param [ ServerSession ] server_session The server session this session is associated with.
-    # @param [ Client ] client The client through which this session is created.
-    # @param [ Hash ] options The options for this session.
-    #
-    # @option options [ true|false ] :causal_consistency Whether to enable
-    #   causal consistency for this session.
-    # @option options [ Hash ] :default_transaction_options Options to pass
-    #   to start_transaction by default, can contain any of the options that
-    #   start_transaction accepts.
-    # @option options [ true|false ] :implicit For internal driver use only -
-    #   specifies whether the session is implicit.
-    # @option options [ Hash ] :read_preference The read preference options hash,
-    #   with the following optional keys:
-    #   - *:mode* -- the read preference as a string or symbol; valid values are
-    #     *:primary*, *:primary_preferred*, *:secondary*, *:secondary_preferred*
-    #     and *:nearest*.
-    #
-    # @since 2.5.0
-    # @api private
-    def initialize(server_session, client, options = {})
-      @server_session = server_session
-      options = options.dup
-
-      # Because the read preference will need to be inserted into a command as a string, we convert
-      # it from a symbol immediately upon receiving it.
-      if options[:read_preference] && options[:read_preference][:mode]
-        options[:read_preference][:mode] = options[:read_preference][:mode].to_s
-      end
-
-      @client = client.use(:admin)
-      @options = options.freeze
-      @cluster_time = nil
-      @state = NO_TRANSACTION_STATE
-    end
 
     # Get a formatted string for use in inspection.
     #
@@ -157,6 +275,16 @@ module Mongo
     end
 
     # End this session.
+    #
+    # If there is an in-progress transaction on this session, the transaction
+    # is aborted. The server session associated with this session is returned
+    # to the server session pool. Finally, this session is marked ended and
+    # is no longer usable.
+    #
+    # If this session is already ended, this method does nothing.
+    #
+    # Note that this method does not directly issue an endSessions command
+    # to this server, contrary to what its name might suggest.
     #
     # @example
     #   session.end_session
@@ -176,546 +304,6 @@ module Mongo
       end
     ensure
       @server_session = nil
-    end
-
-    # Whether this session has ended.
-    #
-    # @example
-    #   session.ended?
-    #
-    # @return [ true, false ] Whether the session has ended.
-    #
-    # @since 2.5.0
-    def ended?
-      @server_session.nil?
-    end
-
-    # Add the autocommit field to a command document if applicable.
-    #
-    # @example
-    #   session.add_autocommit!(cmd)
-    #
-    # @return [ Hash, BSON::Document ] The command document.
-    #
-    # @since 2.6.0
-    # @api private
-    def add_autocommit!(command)
-      command.tap do |c|
-        c[:autocommit] = false if in_transaction?
-      end
-    end
-
-    # Add this session's id to a command document.
-    #
-    # @example
-    #   session.add_id!(cmd)
-    #
-    # @return [ Hash, BSON::Document ] The command document.
-    #
-    # @since 2.5.0
-    # @api private
-    def add_id!(command)
-      command.merge!(lsid: session_id)
-    end
-
-    # Add the startTransaction field to a command document if applicable.
-    #
-    # @example
-    #   session.add_start_transaction!(cmd)
-    #
-    # @return [ Hash, BSON::Document ] The command document.
-    #
-    # @since 2.6.0
-    # @api private
-    def add_start_transaction!(command)
-      command.tap do |c|
-        if starting_transaction?
-          c[:startTransaction] = true
-        end
-      end
-    end
-
-    # Add the transaction number to a command document if applicable.
-    #
-    # @example
-    #   session.add_txn_num!(cmd)
-    #
-    # @return [ Hash, BSON::Document ] The command document.
-    #
-    # @since 2.6.0
-    # @api private
-    def add_txn_num!(command)
-      command.tap do |c|
-        c[:txnNumber] = BSON::Int64.new(@server_session.txn_num) if in_transaction?
-      end
-    end
-
-    # Add the transactions options if applicable.
-    #
-    # @example
-    #   session.add_txn_opts!(cmd)
-    #
-    # @return [ Hash, BSON::Document ] The command document.
-    #
-    # @since 2.6.0
-    # @api private
-    def add_txn_opts!(command, read)
-      command.tap do |c|
-        # The read preference should be added for all read operations.
-        if read && txn_read_pref = txn_read_preference
-          Mongo::Lint.validate_underscore_read_preference(txn_read_pref)
-          txn_read_pref = txn_read_pref.dup
-          txn_read_pref[:mode] = txn_read_pref[:mode].to_s.gsub(/(_\w)/) { |match| match[1].upcase }
-          Mongo::Lint.validate_camel_case_read_preference(txn_read_pref)
-          c['$readPreference'] = txn_read_pref
-        end
-
-        # The read concern should be added to any command that starts a transaction.
-        if starting_transaction?
-          # https://jira.mongodb.org/browse/SPEC-1161: transaction's
-          # read concern overrides collection/database/client read concerns,
-          # even if transaction's read concern is not set.
-          # Read concern here is the one sent to the server and may
-          # include afterClusterTime.
-          if rc = c[:readConcern]
-            rc = rc.dup
-            rc.delete(:level)
-          end
-          if txn_read_concern
-            if rc
-              rc.update(txn_read_concern)
-            else
-              rc = txn_read_concern.dup
-            end
-          end
-          if rc.nil? || rc.empty?
-            c.delete(:readConcern)
-          else
-            c[:readConcern ] = rc
-          end
-        end
-
-        # We need to send the read concern level as a string rather than a symbol.
-        if c[:readConcern] && c[:readConcern][:level]
-          c[:readConcern][:level] = c[:readConcern][:level].to_s
-        end
-
-        # The write concern should be added to any abortTransaction or commitTransaction command.
-        if (c[:abortTransaction] || c[:commitTransaction])
-          if @already_committed
-            wc = BSON::Document.new(c[:writeConcern] || txn_write_concern || {})
-            wc.merge!(w: :majority)
-            wc[:wtimeout] ||= 10000
-            c[:writeConcern] = wc
-          elsif txn_write_concern
-            c[:writeConcern] ||= txn_write_concern
-          end
-        end
-
-        # A non-numeric write concern w value needs to be sent as a string rather than a symbol.
-        if c[:writeConcern] && c[:writeConcern][:w] && c[:writeConcern][:w].is_a?(Symbol)
-          c[:writeConcern][:w] = c[:writeConcern][:w].to_s
-        end
-      end
-    end
-
-    # Remove the read concern and/or write concern from the command if not applicable.
-    #
-    # @example
-    #   session.suppress_read_write_concern!(cmd)
-    #
-    # @return [ Hash, BSON::Document ] The command document.
-    #
-    # @since 2.6.0
-    # @api private
-    def suppress_read_write_concern!(command)
-      command.tap do |c|
-        next unless in_transaction?
-
-        c.delete(:readConcern) unless starting_transaction?
-        c.delete(:writeConcern) unless c[:commitTransaction] || c[:abortTransaction]
-      end
-    end
-
-    # Ensure that the read preference of a command primary.
-    #
-    # @example
-    #   session.validate_read_preference!(command)
-    #
-    # @raise [ Mongo::Error::InvalidTransactionOperation ] If the read preference of the command is
-    #   not primary.
-    #
-    # @since 2.6.0
-    # @api private
-    def validate_read_preference!(command)
-      return unless in_transaction? && non_primary_read_preference_mode?(command)
-
-      raise Mongo::Error::InvalidTransactionOperation.new(
-        Mongo::Error::InvalidTransactionOperation::INVALID_READ_PREFERENCE)
-    end
-
-    # Update the state of the session due to a (non-commit and non-abort) operation being run.
-    #
-    # @since 2.6.0
-    # @api private
-    def update_state!
-      case @state
-      when STARTING_TRANSACTION_STATE
-        @state = TRANSACTION_IN_PROGRESS_STATE
-      when TRANSACTION_COMMITTED_STATE, TRANSACTION_ABORTED_STATE
-        @state = NO_TRANSACTION_STATE
-      end
-    end
-
-    # Validate the session.
-    #
-    # @example
-    #   session.validate!(cluster)
-    #
-    # @param [ Cluster ] cluster The cluster the session is attempted to be used with.
-    #
-    # @return [ nil ] nil if the session is valid.
-    #
-    # @raise [ Mongo::Error::InvalidSession ] Raise error if the session is not valid.
-    #
-    # @since 2.5.0
-    # @api private
-    def validate!(cluster)
-      check_matching_cluster!(cluster)
-      check_if_ended!
-      self
-    end
-
-    # Process a response from the server that used this session.
-    #
-    # @example Process a response from the server.
-    #   session.process(result)
-    #
-    # @param [ Operation::Result ] result The result from the operation.
-    #
-    # @return [ Operation::Result ] The result.
-    #
-    # @since 2.5.0
-    # @api private
-    def process(result)
-      unless implicit?
-        set_operation_time(result)
-        if cluster_time_doc = result.cluster_time
-          advance_cluster_time(cluster_time_doc)
-        end
-      end
-      @server_session.set_last_use!
-      result
-    end
-
-    # Advance the cached operation time for this session.
-    #
-    # @example Advance the operation time.
-    #   session.advance_operation_time(timestamp)
-    #
-    # @param [ BSON::Timestamp ] new_operation_time The new operation time.
-    #
-    # @return [ BSON::Timestamp ] The max operation time, considering the current and new times.
-    #
-    # @since 2.5.0
-    def advance_operation_time(new_operation_time)
-      if @operation_time
-        @operation_time = [ @operation_time, new_operation_time ].max
-      else
-        @operation_time = new_operation_time
-      end
-    end
-
-    # Whether reads executed with this session can be retried according to
-    # the modern retryable reads specification.
-    #
-    # If this method returns true, the modern retryable reads have been
-    # requested by the application. If the server selected for a read operation
-    # supports modern retryable reads, they will be used for that particular
-    # operation. If the server selected for a read operation does not support
-    # modern retryable reads, the read will not be retried.
-    #
-    # If this method returns false, legacy retryable reads have been requested
-    # by the application. Legacy retryable read logic will be used regardless
-    # of server version of the server(s) that the client is connected to.
-    # The number of read retries is given by :max_read_retries client option,
-    # which is 1 by default and can be set to 0 to disable legacy read retries.
-    #
-    # @api private
-    def retry_reads?
-      client.options[:retry_reads] != false
-    end
-
-    # Will writes executed with this session be retried.
-    #
-    # @example Will writes be retried.
-    #   session.retry_writes?
-    #
-    # @return [ true, false ] If writes will be retried.
-    #
-    # @note Retryable writes are only available on server versions at least 3.6
-    #   and with sharded clusters or replica sets.
-    #
-    # @since 2.5.0
-    def retry_writes?
-      !!client.options[:retry_writes] && (cluster.replica_set? || cluster.sharded?)
-    end
-
-    # Get the server session id of this session, if the session was not ended.
-    # If the session was ended, returns nil.
-    #
-    # @example Get the session id.
-    #   session.session_id
-    #
-    # @return [ BSON::Document ] The server session id.
-    #
-    # @since 2.5.0
-    def session_id
-      if ended?
-        raise Error::SessionEnded
-      end
-
-      @server_session.session_id
-    end
-
-    # Increment and return the next transaction number.
-    #
-    # @example Get the next transaction number.
-    #   session.next_txn_num
-    #
-    # @return [ Integer ] The next transaction number.
-    #
-    # @since 2.5.0
-    # @api private
-    def next_txn_num
-      if ended?
-        raise Error::SessionEnded
-      end
-
-      @server_session.next_txn_num
-    end
-
-    # Get the current transaction number.
-    #
-    # @example Get the current transaction number.
-    #   session.txn_num
-    #
-    # @return [ Integer ] The current transaction number.
-    #
-    # @since 2.6.0
-    def txn_num
-      if ended?
-        raise Error::SessionEnded
-      end
-
-      @server_session.txn_num
-    end
-
-    # Is this session an implicit one (not user-created).
-    #
-    # @example Is the session implicit?
-    #   session.implicit?
-    #
-    # @return [ true, false ] Whether this session is implicit.
-    #
-    # @since 2.5.1
-    def implicit?
-      @implicit ||= !!(@options.key?(:implicit) && @options[:implicit] == true)
-    end
-
-    # Is this session an explicit one (i.e. user-created).
-    #
-    # @example Is the session explicit?
-    #   session.explicit?
-    #
-    # @return [ true, false ] Whether this session is explicit.
-    #
-    # @since 2.5.2
-    def explicit?
-      @explicit ||= !implicit?
-    end
-
-    # Places subsequent operations in this session into a new transaction.
-    #
-    # Note that the transaction will not be started on the server until an
-    # operation is performed after start_transaction is called.
-    #
-    # @example Start a new transaction
-    #   session.start_transaction(options)
-    #
-    # @param [ Hash ] options The options for the transaction being started.
-    #
-    # @option options [ Hash ] read_concern The read concern options hash,
-    #   with the following optional keys:
-    #   - *:level* -- the read preference level as a symbol; valid values
-    #      are *:local*, *:majority*, and *:snapshot*
-    # @option options [ Hash ] :write_concern The write concern options. Can be :w =>
-    #   Integer|String, :fsync => Boolean, :j => Boolean.
-    # @option options [ Hash ] :read The read preference options. The hash may have the following
-    #   items:
-    #   - *:mode* -- read preference specified as a symbol; the only valid value is
-    #     *:primary*.
-    #
-    # @raise [ Error::InvalidTransactionOperation ] If a transaction is already in
-    #   progress or if the write concern is unacknowledged.
-    #
-    # @since 2.6.0
-    def start_transaction(options = nil)
-      if options
-        Lint.validate_read_concern_option(options[:read_concern])
-      end
-
-      check_if_ended!
-
-      if within_states?(STARTING_TRANSACTION_STATE, TRANSACTION_IN_PROGRESS_STATE)
-        raise Mongo::Error::InvalidTransactionOperation.new(
-          Mongo::Error::InvalidTransactionOperation::TRANSACTION_ALREADY_IN_PROGRESS)
-      end
-
-      next_txn_num
-      @txn_options = options || @options[:default_transaction_options] || {}
-
-      if txn_write_concern && WriteConcern.send(:unacknowledged?, txn_write_concern)
-        raise Mongo::Error::InvalidTransactionOperation.new(
-          Mongo::Error::InvalidTransactionOperation::UNACKNOWLEDGED_WRITE_CONCERN)
-      end
-
-      @state = STARTING_TRANSACTION_STATE
-      @already_committed = false
-    end
-
-    # Commit the currently active transaction on the session.
-    #
-    # @example Commits the transaction.
-    #   session.commit_transaction
-    #
-    # @option options :write_concern [ nil | WriteConcern::Base ] The write
-    #   concern to use for this operation.
-    #
-    # @raise [ Error::InvalidTransactionOperation ] If there is no active transaction.
-    #
-    # @since 2.6.0
-    def commit_transaction(options=nil)
-      check_if_ended!
-      check_if_no_transaction!
-
-      if within_states?(TRANSACTION_ABORTED_STATE)
-        raise Mongo::Error::InvalidTransactionOperation.new(
-          Mongo::Error::InvalidTransactionOperation.cannot_call_after_msg(
-            :abortTransaction, :commitTransaction))
-      end
-
-      options ||= {}
-
-      begin
-        # If commitTransaction is called twice, we need to run the same commit
-        # operation again, so we revert the session to the previous state.
-        if within_states?(TRANSACTION_COMMITTED_STATE)
-          @state = @last_commit_skipped ? STARTING_TRANSACTION_STATE : TRANSACTION_IN_PROGRESS_STATE
-          @already_committed = true
-        end
-
-        if starting_transaction?
-          @last_commit_skipped = true
-        else
-          @last_commit_skipped = false
-
-          write_concern = options[:write_concern] || txn_options[:write_concern]
-          if write_concern && !write_concern.is_a?(WriteConcern::Base)
-            write_concern = WriteConcern.get(write_concern)
-          end
-          write_with_retry(self, write_concern, true) do |server, txn_num, is_retry|
-            if is_retry
-              if write_concern
-                wco = write_concern.options.merge(w: :majority)
-                wco[:wtimeout] ||= 10000
-                write_concern = WriteConcern.get(wco)
-              else
-                write_concern = WriteConcern.get(w: :majority, wtimeout: 10000)
-              end
-            end
-            Operation::Command.new(
-              selector: { commitTransaction: 1 },
-              db_name: 'admin',
-              session: self,
-              txn_num: txn_num,
-              write_concern: write_concern,
-            ).execute(server)
-          end
-        end
-      rescue Mongo::Error::NoServerAvailable, Mongo::Error::SocketError => e
-        e.send(:add_label, Mongo::Error::UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL)
-        raise e
-      rescue Mongo::Error::OperationFailure => e
-        err_doc = e.instance_variable_get(:@result).send(:first_document)
-
-        if e.write_retryable? || (err_doc['writeConcernError'] &&
-            !UNLABELED_WRITE_CONCERN_CODES.include?(err_doc['writeConcernError']['code']))
-          e.send(:add_label, Mongo::Error::UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL)
-        end
-
-        raise e
-      ensure
-        @state = TRANSACTION_COMMITTED_STATE
-      end
-    end
-
-    # Abort the currently active transaction without making any changes to the database.
-    #
-    # @example Abort the transaction.
-    #   session.abort_transaction
-    #
-    # @raise [ Error::InvalidTransactionOperation ] If there is no active transaction.
-    #
-    # @since 2.6.0
-    def abort_transaction
-      check_if_ended!
-      check_if_no_transaction!
-
-      if within_states?(TRANSACTION_COMMITTED_STATE)
-        raise Mongo::Error::InvalidTransactionOperation.new(
-          Mongo::Error::InvalidTransactionOperation.cannot_call_after_msg(
-            :commitTransaction, :abortTransaction))
-      end
-
-      if within_states?(TRANSACTION_ABORTED_STATE)
-        raise Mongo::Error::InvalidTransactionOperation.new(
-          Mongo::Error::InvalidTransactionOperation.cannot_call_twice_msg(:abortTransaction))
-      end
-
-      begin
-        unless starting_transaction?
-          write_with_retry(self, txn_options[:write_concern], true) do |server, txn_num|
-            Operation::Command.new(
-              selector: { abortTransaction: 1 },
-              db_name: 'admin',
-              session: self,
-              txn_num: txn_num
-            ).execute(server)
-          end
-        end
-
-        @state = TRANSACTION_ABORTED_STATE
-      rescue Mongo::Error::InvalidTransactionOperation
-        raise
-      rescue Mongo::Error
-        @state = TRANSACTION_ABORTED_STATE
-      rescue Exception
-        @state = TRANSACTION_ABORTED_STATE
-        raise
-      end
-    end
-
-    # Whether or not the session is currently in a transaction.
-    #
-    # @example Is the session in a transaction?
-    #   session.in_transaction?
-    #
-    # @return [ true | false ] Whether or not the session in a transaction.
-    #
-    # @since 2.6.0
-    def in_transaction?
-      within_states?(STARTING_TRANSACTION_STATE, TRANSACTION_IN_PROGRESS_STATE)
     end
 
     # Executes the provided block in a transaction, retrying as necessary.
@@ -796,7 +384,7 @@ module Mongo
             raise
           end
 
-          if e.is_a?(Mongo::Error) && e.label?(Mongo::Error::TRANSIENT_TRANSACTION_ERROR_LABEL)
+          if e.is_a?(Mongo::Error) && e.label?('TransientTransactionError')
             next
           end
 
@@ -812,12 +400,7 @@ module Mongo
             transaction_in_progress = false
             return rv
           rescue Mongo::Error => e
-            if e.label?(Mongo::Error::UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL)
-              # WriteConcernFailed
-              if e.is_a?(Mongo::Error::OperationFailure) && e.code == 64 && e.wtimeout?
-                transaction_in_progress = false
-                raise
-              end
+            if e.label?('UnknownTransactionCommitResult')
               if Time.now >= deadline
                 transaction_in_progress = false
                 raise
@@ -832,7 +415,7 @@ module Mongo
                 end
               commit_options[:write_concern] = wc_options.merge(w: :majority)
               retry
-            elsif e.label?(Mongo::Error::TRANSIENT_TRANSACTION_ERROR_LABEL)
+            elsif e.label?('TransientTransactionError')
               if Time.now >= deadline
                 transaction_in_progress = false
                 raise
@@ -845,6 +428,10 @@ module Mongo
           end
         end
       end
+
+      # No official return value, but return true so that in interactive
+      # use the method hints that it succeeded.
+      true
     ensure
       if transaction_in_progress
         log_warn('with_transaction callback altered with_transaction loop, aborting transaction')
@@ -855,29 +442,542 @@ module Mongo
       end
     end
 
-    # Get the read preference the session will use in the currently
-    # active transaction.
+    # Places subsequent operations in this session into a new transaction.
     #
-    # This is a driver style hash with underscore keys.
+    # Note that the transaction will not be started on the server until an
+    # operation is performed after start_transaction is called.
     #
-    # @example Get the transaction's read preference
-    #   session.txn_read_preference
+    # @example Start a new transaction
+    #   session.start_transaction(options)
     #
-    # @return [ Hash ] The read preference of the transaction.
+    # @param [ Hash ] options The options for the transaction being started.
+    #
+    # @option options [ Hash ] read_concern The read concern options hash,
+    #   with the following optional keys:
+    #   - *:level* -- the read preference level as a symbol; valid values
+    #      are *:local*, *:majority*, and *:snapshot*
+    # @option options [ Hash ] :write_concern The write concern options. Can be :w =>
+    #   Integer|String, :fsync => Boolean, :j => Boolean.
+    # @option options [ Hash ] :read The read preference options. The hash may have the following
+    #   items:
+    #   - *:mode* -- read preference specified as a symbol; the only valid value is
+    #     *:primary*.
+    #
+    # @raise [ Error::InvalidTransactionOperation ] If a transaction is already in
+    #   progress or if the write concern is unacknowledged.
     #
     # @since 2.6.0
-    def txn_read_preference
-      rp = txn_options && txn_options[:read_preference] ||
-        @client.read_preference
-      Mongo::Lint.validate_underscore_read_preference(rp)
-      rp
+    def start_transaction(options = nil)
+      if options
+        Lint.validate_read_concern_option(options[:read_concern])
+
+=begin
+        # It would be handy to detect invalid read preferences here, but
+        # some of the spec tests require later detection of invalid read prefs.
+        # Maybe we can do this when lint mode is on.
+        mode = options[:read] && options[:read][:mode].to_s
+        if mode && mode != 'primary'
+          raise Mongo::Error::InvalidTransactionOperation.new(
+            "read preference in a transaction must be primary (requested: #{mode})"
+          )
+        end
+=end
+      end
+
+      check_if_ended!
+
+      if within_states?(STARTING_TRANSACTION_STATE, TRANSACTION_IN_PROGRESS_STATE)
+        raise Mongo::Error::InvalidTransactionOperation.new(
+          Mongo::Error::InvalidTransactionOperation::TRANSACTION_ALREADY_IN_PROGRESS)
+      end
+
+      unpin
+
+      next_txn_num
+      @txn_options = (@options[:default_transaction_options] || {}).merge(options || {})
+
+      if txn_write_concern && !WriteConcern.get(txn_write_concern).acknowledged?
+        raise Mongo::Error::InvalidTransactionOperation.new(
+          Mongo::Error::InvalidTransactionOperation::UNACKNOWLEDGED_WRITE_CONCERN)
+      end
+
+      @state = STARTING_TRANSACTION_STATE
+      @already_committed = false
+
+      # This method has no explicit return value.
+      # We could return nil here but true indicates to the user that the
+      # operation succeeded. This is intended for interactive use.
+      # Note that the return value is not documented.
+      true
     end
 
-    def cluster
-      @client.cluster
+    # Commit the currently active transaction on the session.
+    #
+    # @example Commits the transaction.
+    #   session.commit_transaction
+    #
+    # @option options :write_concern [ nil | WriteConcern::Base ] The write
+    #   concern to use for this operation.
+    #
+    # @raise [ Error::InvalidTransactionOperation ] If there is no active transaction.
+    #
+    # @since 2.6.0
+    def commit_transaction(options=nil)
+      check_if_ended!
+      check_if_no_transaction!
+
+      if within_states?(TRANSACTION_ABORTED_STATE)
+        raise Mongo::Error::InvalidTransactionOperation.new(
+          Mongo::Error::InvalidTransactionOperation.cannot_call_after_msg(
+            :abortTransaction, :commitTransaction))
+      end
+
+      options ||= {}
+
+      begin
+        # If commitTransaction is called twice, we need to run the same commit
+        # operation again, so we revert the session to the previous state.
+        if within_states?(TRANSACTION_COMMITTED_STATE)
+          @state = @last_commit_skipped ? STARTING_TRANSACTION_STATE : TRANSACTION_IN_PROGRESS_STATE
+          @already_committed = true
+        end
+
+        if starting_transaction?
+          @last_commit_skipped = true
+        else
+          @last_commit_skipped = false
+          @committing_transaction = true
+
+          write_concern = options[:write_concern] || txn_options[:write_concern]
+          if write_concern && !write_concern.is_a?(WriteConcern::Base)
+            write_concern = WriteConcern.get(write_concern)
+          end
+          write_with_retry(self, write_concern, true) do |server, txn_num, is_retry|
+            if is_retry
+              if write_concern
+                wco = write_concern.options.merge(w: :majority)
+                wco[:wtimeout] ||= 10000
+                write_concern = WriteConcern.get(wco)
+              else
+                write_concern = WriteConcern.get(w: :majority, wtimeout: 10000)
+              end
+            end
+            Operation::Command.new(
+              selector: { commitTransaction: 1 },
+              db_name: 'admin',
+              session: self,
+              txn_num: txn_num,
+              write_concern: write_concern,
+            ).execute(server)
+          end
+        end
+      ensure
+        @state = TRANSACTION_COMMITTED_STATE
+        @committing_transaction = false
+      end
+
+      # No official return value, but return true so that in interactive
+      # use the method hints that it succeeded.
+      true
     end
 
-		protected
+    # Abort the currently active transaction without making any changes to the database.
+    #
+    # @example Abort the transaction.
+    #   session.abort_transaction
+    #
+    # @raise [ Error::InvalidTransactionOperation ] If there is no active transaction.
+    #
+    # @since 2.6.0
+    def abort_transaction
+      check_if_ended!
+      check_if_no_transaction!
+
+      if within_states?(TRANSACTION_COMMITTED_STATE)
+        raise Mongo::Error::InvalidTransactionOperation.new(
+          Mongo::Error::InvalidTransactionOperation.cannot_call_after_msg(
+            :commitTransaction, :abortTransaction))
+      end
+
+      if within_states?(TRANSACTION_ABORTED_STATE)
+        raise Mongo::Error::InvalidTransactionOperation.new(
+          Mongo::Error::InvalidTransactionOperation.cannot_call_twice_msg(:abortTransaction))
+      end
+
+      begin
+        unless starting_transaction?
+          write_with_retry(self, txn_options[:write_concern], true) do |server, txn_num|
+            Operation::Command.new(
+              selector: { abortTransaction: 1 },
+              db_name: 'admin',
+              session: self,
+              txn_num: txn_num
+            ).execute(server)
+          end
+        end
+
+        @state = TRANSACTION_ABORTED_STATE
+      rescue Mongo::Error::InvalidTransactionOperation
+        raise
+      rescue Mongo::Error
+        @state = TRANSACTION_ABORTED_STATE
+      rescue Exception
+        @state = TRANSACTION_ABORTED_STATE
+        raise
+      end
+
+      # No official return value, but return true so that in interactive
+      # use the method hints that it succeeded.
+      true
+    end
+
+    # @api private
+    def starting_transaction?
+      within_states?(STARTING_TRANSACTION_STATE)
+    end
+
+    # Whether or not the session is currently in a transaction.
+    #
+    # @example Is the session in a transaction?
+    #   session.in_transaction?
+    #
+    # @return [ true | false ] Whether or not the session in a transaction.
+    #
+    # @since 2.6.0
+    def in_transaction?
+      within_states?(STARTING_TRANSACTION_STATE, TRANSACTION_IN_PROGRESS_STATE)
+    end
+
+    # @return [ true | false ] Whether the session is currently committing a
+    #   transaction.
+    #
+    # @api private
+    def committing_transaction?
+      !!@committing_transaction
+    end
+
+    # Pins this session to the specified server, which should be a mongos.
+    #
+    # @param [ Server ] server The server to pin this session to.
+    #
+    # @api private
+    def pin(server)
+      if server.nil?
+        raise ArgumentError, 'Cannot pin to a nil server'
+      end
+      if Lint.enabled?
+        unless server.mongos?
+          raise Error::LintError, "Attempted to pin the session to server #{server.summary} which is not a mongos"
+        end
+      end
+      @pinned_server = server
+    end
+
+    # Unpins this session from the pinned server, if the session was pinned.
+    #
+    # @api private
+    def unpin
+      @pinned_server = nil
+    end
+
+    # Unpins this session from the pinned server, if the session was pinned
+    # and the specified exception instance and the session's transaction state
+    # require it to be unpinned.
+    #
+    # The exception instance should already have all of the labels set on it
+    # (both client- and server-side generated ones).
+    #
+    # @param [ Error ] The exception instance to process.
+    #
+    # @api private
+    def unpin_maybe(error)
+      if !within_states?(Session::NO_TRANSACTION_STATE) &&
+        error.label?('TransientTransactionError')
+      then
+        unpin
+      end
+
+      if committing_transaction? &&
+        error.label?('UnknownTransactionCommitResult')
+      then
+        unpin
+      end
+    end
+
+    # Add the autocommit field to a command document if applicable.
+    #
+    # @example
+    #   session.add_autocommit!(cmd)
+    #
+    # @return [ Hash, BSON::Document ] The command document.
+    #
+    # @since 2.6.0
+    # @api private
+    def add_autocommit!(command)
+      command.tap do |c|
+        c[:autocommit] = false if in_transaction?
+      end
+    end
+
+    # Add this session's id to a command document.
+    #
+    # @example
+    #   session.add_id!(cmd)
+    #
+    # @return [ Hash, BSON::Document ] The command document.
+    #
+    # @since 2.5.0
+    # @api private
+    def add_id!(command)
+      command.merge!(lsid: session_id)
+    end
+
+    # Add the startTransaction field to a command document if applicable.
+    #
+    # @example
+    #   session.add_start_transaction!(cmd)
+    #
+    # @return [ Hash, BSON::Document ] The command document.
+    #
+    # @since 2.6.0
+    # @api private
+    def add_start_transaction!(command)
+      command.tap do |c|
+        if starting_transaction?
+          c[:startTransaction] = true
+        end
+      end
+    end
+
+    # Add the transaction number to a command document if applicable.
+    #
+    # @example
+    #   session.add_txn_num!(cmd)
+    #
+    # @return [ Hash, BSON::Document ] The command document.
+    #
+    # @since 2.6.0
+    # @api private
+    def add_txn_num!(command)
+      command.tap do |c|
+        c[:txnNumber] = BSON::Int64.new(@server_session.txn_num) if in_transaction?
+      end
+    end
+
+    # Add the transactions options if applicable.
+    #
+    # @example
+    #   session.add_txn_opts!(cmd)
+    #
+    # @return [ Hash, BSON::Document ] The command document.
+    #
+    # @since 2.6.0
+    # @api private
+    def add_txn_opts!(command, read)
+      command.tap do |c|
+        # The read concern should be added to any command that starts a transaction.
+        if starting_transaction?
+          # https://jira.mongodb.org/browse/SPEC-1161: transaction's
+          # read concern overrides collection/database/client read concerns,
+          # even if transaction's read concern is not set.
+          # Read concern here is the one sent to the server and may
+          # include afterClusterTime.
+          if rc = c[:readConcern]
+            rc = rc.dup
+            rc.delete(:level)
+          end
+          if txn_read_concern
+            if rc
+              rc.update(txn_read_concern)
+            else
+              rc = txn_read_concern.dup
+            end
+          end
+          if rc.nil? || rc.empty?
+            c.delete(:readConcern)
+          else
+            c[:readConcern ] = Options::Mapper.transform_values_to_strings(rc)
+          end
+        end
+
+        # We need to send the read concern level as a string rather than a symbol.
+        if c[:readConcern]
+          c[:readConcern] = Options::Mapper.transform_values_to_strings(c[:readConcern])
+        end
+
+        # The write concern should be added to any abortTransaction or commitTransaction command.
+        if (c[:abortTransaction] || c[:commitTransaction])
+          if @already_committed
+            wc = BSON::Document.new(c[:writeConcern] || txn_write_concern || {})
+            wc.merge!(w: :majority)
+            wc[:wtimeout] ||= 10000
+            c[:writeConcern] = wc
+          elsif txn_write_concern
+            c[:writeConcern] ||= txn_write_concern
+          end
+        end
+
+        # A non-numeric write concern w value needs to be sent as a string rather than a symbol.
+        if c[:writeConcern] && c[:writeConcern][:w] && c[:writeConcern][:w].is_a?(Symbol)
+          c[:writeConcern][:w] = c[:writeConcern][:w].to_s
+        end
+      end
+    end
+
+    # Remove the read concern and/or write concern from the command if not applicable.
+    #
+    # @example
+    #   session.suppress_read_write_concern!(cmd)
+    #
+    # @return [ Hash, BSON::Document ] The command document.
+    #
+    # @since 2.6.0
+    # @api private
+    def suppress_read_write_concern!(command)
+      command.tap do |c|
+        next unless in_transaction?
+
+        c.delete(:readConcern) unless starting_transaction?
+        c.delete(:writeConcern) unless c[:commitTransaction] || c[:abortTransaction]
+      end
+    end
+
+    # Ensure that the read preference of a command primary.
+    #
+    # @example
+    #   session.validate_read_preference!(command)
+    #
+    # @raise [ Mongo::Error::InvalidTransactionOperation ] If the read preference of the command is
+    #   not primary.
+    #
+    # @since 2.6.0
+    # @api private
+    def validate_read_preference!(command)
+      return unless in_transaction?
+      return unless command['$readPreference']
+
+      mode = command['$readPreference']['mode'] || command['$readPreference'][:mode]
+
+      if mode && mode != 'primary'
+        raise Mongo::Error::InvalidTransactionOperation.new(
+          "read preference in a transaction must be primary (requested: #{mode})"
+        )
+      end
+    end
+
+    # Update the state of the session due to a (non-commit and non-abort) operation being run.
+    #
+    # @since 2.6.0
+    # @api private
+    def update_state!
+      case @state
+      when STARTING_TRANSACTION_STATE
+        @state = TRANSACTION_IN_PROGRESS_STATE
+      when TRANSACTION_COMMITTED_STATE, TRANSACTION_ABORTED_STATE
+        @state = NO_TRANSACTION_STATE
+      end
+    end
+
+    # Validate the session.
+    #
+    # @example
+    #   session.validate!(cluster)
+    #
+    # @param [ Cluster ] cluster The cluster the session is attempted to be used with.
+    #
+    # @return [ nil ] nil if the session is valid.
+    #
+    # @raise [ Mongo::Error::InvalidSession ] Raise error if the session is not valid.
+    #
+    # @since 2.5.0
+    # @api private
+    def validate!(cluster)
+      check_matching_cluster!(cluster)
+      check_if_ended!
+      self
+    end
+
+    # Process a response from the server that used this session.
+    #
+    # @example Process a response from the server.
+    #   session.process(result)
+    #
+    # @param [ Operation::Result ] result The result from the operation.
+    #
+    # @return [ Operation::Result ] The result.
+    #
+    # @since 2.5.0
+    # @api private
+    def process(result)
+      unless implicit?
+        set_operation_time(result)
+        if cluster_time_doc = result.cluster_time
+          advance_cluster_time(cluster_time_doc)
+        end
+      end
+      @server_session.set_last_use!
+
+      if doc = result.reply && result.reply.documents.first
+        if doc[:recoveryToken]
+          self.recovery_token = doc[:recoveryToken]
+        end
+      end
+
+      result
+    end
+
+    # Advance the cached operation time for this session.
+    #
+    # @example Advance the operation time.
+    #   session.advance_operation_time(timestamp)
+    #
+    # @param [ BSON::Timestamp ] new_operation_time The new operation time.
+    #
+    # @return [ BSON::Timestamp ] The max operation time, considering the current and new times.
+    #
+    # @since 2.5.0
+    def advance_operation_time(new_operation_time)
+      if @operation_time
+        @operation_time = [ @operation_time, new_operation_time ].max
+      else
+        @operation_time = new_operation_time
+      end
+    end
+
+    # Increment and return the next transaction number.
+    #
+    # @example Get the next transaction number.
+    #   session.next_txn_num
+    #
+    # @return [ Integer ] The next transaction number.
+    #
+    # @since 2.5.0
+    # @api private
+    def next_txn_num
+      if ended?
+        raise Error::SessionEnded
+      end
+
+      @server_session.next_txn_num
+    end
+
+    # Get the current transaction number.
+    #
+    # @example Get the current transaction number.
+    #   session.txn_num
+    #
+    # @return [ Integer ] The current transaction number.
+    #
+    # @since 2.6.0
+    def txn_num
+      if ended?
+        raise Error::SessionEnded
+      end
+
+      @server_session.txn_num
+    end
+
+    private
 
     # Get the read concern the session will use when starting a transaction.
     #
@@ -894,14 +994,8 @@ module Mongo
       txn_options && txn_options[:read_concern] || @client.read_concern
     end
 
-    private
-
     def within_states?(*states)
       states.include?(@state)
-    end
-
-    def starting_transaction?
-      within_states?(STARTING_TRANSACTION_STATE)
     end
 
     def check_if_no_transaction!
@@ -914,13 +1008,6 @@ module Mongo
     def txn_write_concern
       (txn_options && txn_options[:write_concern]) ||
         (@client.write_concern && @client.write_concern.options)
-    end
-
-    def non_primary_read_preference_mode?(command)
-      return false unless command['$readPreference']
-
-      mode = command['$readPreference']['mode'] || command['$readPreference'][:mode]
-      mode && mode != 'primary'
     end
 
     # Returns causal consistency document if the last operation time is

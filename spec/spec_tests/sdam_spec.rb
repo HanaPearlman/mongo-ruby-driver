@@ -29,14 +29,12 @@ describe 'Server Discovery and Monitoring' do
       before(:all) do
         # Since we supply all server descriptions and drive events,
         # background monitoring only gets in the way. Disable it.
-        @client = Mongo::Client.new(spec.uri_string, monitoring_io: false)
-        client_options = @client.instance_variable_get(:@options)
-        @client.instance_variable_set(:@options, client_options.merge(heartbeat_frequency: 100, connect_timeout: 0.1))
-        @client.cluster.instance_variable_set(:@options, client_options.merge(heartbeat_frequency: 100, connect_timeout: 0.1))
+        @client = new_local_client_nmio(spec.uri_string,
+          heartbeat_frequency: 1000, connect_timeout: 0.1)
       end
 
       after(:all) do
-        @client && @client.close
+        @client && @client.close(true)
       end
 
       spec.phases.each_with_index do |phase, index|
@@ -66,8 +64,7 @@ describe 'Server Discovery and Monitoring' do
               result['maxWireVersion'] ||= 0
               new_description = Mongo::Server::Description.new(
                 server.description.address, result, 0.5)
-              publisher = SdamSpecEventPublisher.new(@client.cluster.send(:event_listeners))
-              publisher.publish(Mongo::Event::DESCRIPTION_CHANGED, server.description, new_description)
+              @client.cluster.run_sdam_flow(server.description, new_description)
             end
           end
 
@@ -160,7 +157,7 @@ describe 'Server Discovery and Monitoring' do
 
             it 'raises an UnsupportedFeatures error' do
               expect {
-                p = Mongo::ServerSelector.get(mode: :primary).select_server(@client.cluster)
+                p = Mongo::ServerSelector.primary.select_server(@client.cluster)
                 s = Mongo::ServerSelector.get(mode: :secondary).select_server(@client.cluster)
                 raise "UnsupportedFeatures not raised but we got #{p.inspect} as primary and #{s.inspect} as secondary"
               }.to raise_exception(Mongo::Error::UnsupportedFeatures)

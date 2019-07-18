@@ -219,8 +219,6 @@ describe Mongo::Collection::View::Aggregation do
   end
 
   describe '#explain' do
-    # Broken on 4.2 - https://jira.mongodb.org/browse/RUBY-1788
-    max_server_version '4.0'
 
     it 'executes an explain' do
       expect(aggregation.explain).to_not be_empty
@@ -273,26 +271,47 @@ describe Mongo::Collection::View::Aggregation do
       context 'when the server selected supports collations' do
         min_server_fcv '3.4'
 
-        context 'when the collation key is a String' do
+        shared_examples_for 'applies the collation' do
 
-          let(:options) do
-            { 'collation' => { locale: 'en_US', strength: 2 } }
+          context 'when the collation key is a String' do
+
+            let(:options) do
+              { 'collation' => { locale: 'en_US', strength: 2 } }
+            end
+
+            it 'applies the collation' do
+              expect(result).to eq('en_US')
+            end
           end
 
-          it 'applies the collation' do
-            expect(result).to eq('en_US')
+          context 'when the collation key is a Symbol' do
+
+            let(:options) do
+              { collation: { locale: 'en_US', strength: 2 } }
+            end
+
+            it 'applies the collation' do
+              expect(result).to eq('en_US')
+            end
           end
         end
 
-        context 'when the collation key is a Symbol' do
+        context '4.0-' do
+          max_server_version '4.0'
 
-          let(:options) do
-            { collation: { locale: 'en_US', strength: 2 } }
+          it_behaves_like 'applies the collation'
+        end
+
+        context '4.2+' do
+          min_server_fcv '4.2'
+
+          let(:result) do
+            skip 'RUBY-1827 / upgrading evergreen 4.1 server binary'
+
+            aggregation.explain['queryPlanner']['collation']['locale']
           end
 
-          it 'applies the collation' do
-            expect(result).to eq('en_US')
-          end
+          it_behaves_like 'applies the collation'
         end
       end
 
@@ -596,7 +615,7 @@ describe Mongo::Collection::View::Aggregation do
 
      it 'reroutes the operation to a primary' do
        allow(aggregation).to receive(:valid_server?).and_return(false)
-       expect(Mongo::Logger.logger).to receive(:warn?).and_call_original
+       expect(Mongo::Logger.logger).to receive(:warn).and_call_original
        aggregation.to_a
      end
     end
@@ -604,7 +623,7 @@ describe Mongo::Collection::View::Aggregation do
     context 'when the server is a valid for writing' do
 
      it 'does not reroute the operation to a primary' do
-       expect(Mongo::Logger.logger).not_to receive(:warn?)
+       expect(Mongo::Logger.logger).not_to receive(:warn)
        aggregation.to_a
      end
 

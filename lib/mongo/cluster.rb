@@ -76,23 +76,31 @@ module Mongo
     # @param [ Hash ] options Options. Client constructor forwards its
     #   options to Cluster constructor, although Cluster recognizes
     #   only a subset of the options recognized by Client.
-    # @option options [ true, false ] :scan Whether to scan all seeds
+    # @option options [ true | false ] :scan Whether to scan all seeds
     #   in constructor. The default in driver version 2.x is to do so;
     #   driver version 3.x will not scan seeds in constructor. Opt in to the
     #   new behavior by setting this option to false. *Note:* setting
     #   this option to nil enables scanning seeds in constructor in driver
     #   version 2.x. Driver version 3.x will recognize this option but
     #   will ignore it and will never scan seeds in the constructor.
-    # @option options [ true, false ] :monitoring_io For internal driver
+    # @option options [ true | false ] :monitoring_io For internal driver
     #   use only. Set to false to prevent SDAM-related I/O from being
     #   done by this cluster or servers under it. Note: setting this option
     #   to false will make the cluster non-functional. It is intended for
     #   use in tests which manually invoke SDAM state transitions.
+    # @option options [ true | false ] :cleanup For internal driver use only.
+    #   Set to false to prevent endSessions command being sent to the server
+    #   to clean up server sessions when the cluster is disconnected, and to
+    #   to not start the periodic executor. If :monitoring_io is false,
+    #   :cleanup automatically defaults to false as well.
+    # @option options [ Float ] :heartbeat_frequency The interval, in seconds,
+    #   for the server monitor to refresh its description via ismaster.
     #
     # @since 2.0.0
     def initialize(seeds, monitoring, options = Options::Redacted.new)
-      if options[:monitoring_io] != false && !options[:server_selection_semaphore]
-        raise ArgumentError, 'Need server selection semaphore'
+      if options[:monitoring_io] == false && !options.key?(:cleanup)
+        options = options.dup
+        options[:cleanup] = false
       end
 
       @servers = []
@@ -104,6 +112,7 @@ module Mongo
       @sdam_flow_lock = Mutex.new
       @cluster_time = nil
       @cluster_time_lock = Mutex.new
+      @server_selection_semaphore = Semaphore.new
       @topology = Topology.initial(self, monitoring, options)
       Session::SessionPool.create(self)
 
@@ -115,8 +124,6 @@ module Mongo
         Monitoring::TOPOLOGY_OPENING,
         Monitoring::Event::TopologyOpening.new(opening_topology)
       )
-
-      subscribe_to(Event::DESCRIPTION_CHANGED, Event::DescriptionChanged.new(self))
 
       @seeds = seeds
       servers = seeds.map do |seed|
@@ -136,26 +143,31 @@ module Mongo
         )
       end
 
-      servers.each do |server|
-        server.start_monitoring
-      end
-
       if options[:monitoring_io] == false
         # Omit periodic executor construction, because without servers
         # no commands can be sent to the cluster and there shouldn't ever
         # be anything that needs to be cleaned up.
         #
-        # Also omit legacy single round of SDAM on the main thread,
-        # as it would race with tests that mock SDAM responses.
+        # Omit monitoring individual servers and the legacy single round of
+        # of SDAM on the main thread, as it would race with tests that mock
+        # SDAM responses.
+        @connecting = @connected = false
         return
       end
 
-      @cursor_reaper = CursorReaper.new
-      @socket_reaper = SocketReaper.new(self)
-      @periodic_executor = PeriodicExecutor.new(@cursor_reaper, @socket_reaper)
-      @periodic_executor.run!
+      servers.each do |server|
+        server.start_monitoring
+      end
 
-      ObjectSpace.define_finalizer(self, self.class.finalize({}, @periodic_executor, @session_pool))
+      if options[:cleanup] != false
+        @cursor_reaper = CursorReaper.new
+        @socket_reaper = SocketReaper.new(self)
+        @periodic_executor = PeriodicExecutor.new(@cursor_reaper, @socket_reaper)
+
+        ObjectSpace.define_finalizer(self, self.class.finalize({}, @periodic_executor, @session_pool))
+
+        @periodic_executor.run!
+      end
 
       @connecting = false
       @connected = true
@@ -185,7 +197,7 @@ module Mongo
           if (time_remaining = deadline - Time.now) <= 0
             break
           end
-          options[:server_selection_semaphore].wait(time_remaining)
+          server_selection_semaphore.wait(time_remaining)
         end
       end
     end
@@ -242,7 +254,14 @@ module Mongo
 
     def_delegators :topology, :replica_set?, :replica_set_name, :sharded?,
                    :single?, :unknown?
-    def_delegators :@cursor_reaper, :register_cursor, :schedule_kill_cursor, :unregister_cursor
+
+    [:register_cursor, :schedule_kill_cursor, :unregister_cursor].each do |m|
+      define_method(m) do |*args|
+        if options[:cleanup] != false
+          @cursor_reaper.send(m, *args)
+        end
+      end
+    end
 
     # Get the maximum number of times the client can retry a read operation
     # when using legacy read retries.
@@ -278,6 +297,17 @@ module Mongo
     # @deprecated
     def read_retry_interval
       options[:read_retry_interval] || READ_RETRY_INTERVAL
+    end
+
+    # Get the refresh interval for the server. This will be defined via an
+    # option or will default to 10.
+    #
+    # @return [ Float ] The heartbeat interval, in seconds.
+    #
+    # @since 2.10.0
+    # @api private
+    def heartbeat_interval
+      options[:heartbeat_frequency] || Server::Monitor::HEARTBEAT_FREQUENCY
     end
 
     # Whether the cluster object is connected to its cluster.
@@ -348,9 +378,7 @@ module Mongo
     end
 
     # @api private
-    def server_selection_semaphore
-      options[:server_selection_semaphore]
-    end
+    attr_reader :server_selection_semaphore
 
     # Finalize the cluster for garbage collection.
     #
@@ -371,7 +399,7 @@ module Mongo
       end
     end
 
-    # Disconnect all servers.
+    # Close the cluster and disconnect all servers.
     #
     # @note Applications should call Client#close to disconnect from
     # the cluster rather than calling this method. This method is for
@@ -390,7 +418,10 @@ module Mongo
       unless @connecting || @connected
         return true
       end
-      @periodic_executor.stop!
+      if options[:cleanup] != false
+        session_pool.end_sessions
+        @periodic_executor.stop!
+      end
       @servers.each do |server|
         if server.connected?
           server.disconnect!(wait)
@@ -455,14 +486,48 @@ module Mongo
     def scan!(sync=true)
       if sync
         servers_list.each do |server|
-          server.scan!
+          if server.monitor
+            server.monitor.scan!
+          else
+            log_warn("Synchronous scan requested on cluster #{summary} but server #{server} has no monitor")
+          end
         end
       else
         servers_list.each do |server|
-          server.monitor.scan_semaphore.signal
+          server.scan_semaphore.signal
         end
       end
       true
+    end
+
+    # @param [ Server::Description ] previous_desc Previous server description.
+    # @param [ Server::Description ] updated_desc The changed description.
+    #
+    # @api private
+    def run_sdam_flow(previous_desc, updated_desc)
+      @sdam_flow_lock.synchronize do
+        flow = SdamFlow.new(self, previous_desc, updated_desc)
+        flow.server_description_changed
+
+        # SDAM flow may alter the updated description - grab the final
+        # version for the purposes of broadcasting if a server is available
+        updated_desc = flow.updated_desc
+      end
+
+      # Some updated descriptions, e.g. a mismatched me one, result in the
+      # server whose description we are processing being removed from
+      # the topology. When this happens, the server's monitoring thread gets
+      # killed. As a result, any code after the flow invocation may not run
+      # a particular monitor instance, hence there should generally not be
+      # any code in this method past the flow invocation.
+      #
+      # However, this broadcast call can be here because if the monitoring
+      # thread got killed the server should have been closed and no client
+      # should be currently waiting for it, thus not signaling the semaphore
+      # shouldn't cause any problems.
+      unless updated_desc.unknown?
+        server_selection_semaphore.broadcast
+      end
     end
 
     # Determine if this cluster of servers is equal to another object. Checks the
@@ -478,9 +543,7 @@ module Mongo
     # @since 2.0.0
     def ==(other)
       return false unless other.is_a?(Cluster)
-      addresses == other.addresses &&
-        options.merge(server_selection_semaphore: nil) ==
-          other.options.merge(server_selection_semaphore: nil)
+      addresses == other.addresses && options == other.options
     end
 
     # Determine if the cluster would select a readable server for the
@@ -516,16 +579,16 @@ module Mongo
     # @example Get the next primary server.
     #   cluster.next_primary
     #
-    # @param [ true, false ] ping Whether to ping the server before selection. Deprecated,
-    #   not necessary with the implementation of the Server Selection specification.
-    #
+    # @param [ true, false ] ping Whether to ping the server before selection.
+    #   Deprecated and ignored.
+    # @param [ Session | nil ] session Optional session to take into account
+    #   for mongos pinning.
     #
     # @return [ Mongo::Server ] A primary server.
     #
     # @since 2.0.0
-    def next_primary(ping = true)
-      @primary_selector ||= ServerSelector.get(ServerSelector::PRIMARY)
-      @primary_selector.select_server(self)
+    def next_primary(ping = nil, session = nil)
+      ServerSelector.primary.select_server(self, nil, session)
     end
 
     # Get the connection pool for the server.
@@ -631,9 +694,6 @@ module Mongo
       @update_lock.synchronize { @servers.dup }
     end
 
-    # @api private
-    attr_reader :sdam_flow_lock
-
     private
 
     # If options[:session] is set, validates that session and returns it.
@@ -663,6 +723,11 @@ module Mongo
     # @note If the cluster has no data bearing servers, for example because
     #   the deployment is in the middle of a failover, this method returns
     #   false.
+    #
+    # @note This method returns as soon as the driver connects to any single
+    #   server in the deployment. Whether deployment overall supports sessions
+    #   can change depending on how many servers have been contacted, if
+    #   the servers are configured differently.
     def sessions_supported?
       if topology.data_bearing_servers?
         return !!topology.logical_session_timeout

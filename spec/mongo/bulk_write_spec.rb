@@ -80,7 +80,7 @@ describe Mongo::BulkWrite do
           end
 
           it 'sets the document index on the error' do
-            expect(error.result[Mongo::Error::WRITE_ERRORS].first['index']).to eq(2)
+            expect(error.result['writeErrors'].first['index']).to eq(2)
           end
 
           context 'when a session is provided' do
@@ -1223,6 +1223,10 @@ describe Mongo::BulkWrite do
 
             context 'when write_concern is specified as an option' do
 
+              # In a multi-sharded cluster, the write seems to go to a
+              # different shard from the read
+              require_no_multi_shard
+
               let(:extra_options) do
                 { write_concern: { w: 0 } }
               end
@@ -1844,7 +1848,7 @@ describe Mongo::BulkWrite do
 
           it 'sets the document index on the error' do
             requests.push({ insert_one: { _id: 5 }})
-            expect(error.result[Mongo::Error::WRITE_ERRORS].first['index']).to eq(batch_size)
+            expect(error.result['writeErrors'].first['index']).to eq(batch_size)
           end
         end
 
@@ -1886,8 +1890,14 @@ describe Mongo::BulkWrite do
           end
 
           context 'when retryable writes are supported' do
+            require_wired_tiger
             min_server_fcv '3.6'
             require_topology :replica_set, :sharded
+
+            # In a multi-shard cluster, retries may go to a different server
+            # than original command which these tests are not prepared to handle
+            require_no_multi_shard
+
 
             let(:subscriber) { EventSubscriber.new }
 

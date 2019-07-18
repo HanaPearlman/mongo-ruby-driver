@@ -16,9 +16,10 @@ MongoDB Compatibility
 .. list-table::
    :header-rows: 1
    :stub-columns: 1
-   :class: compatibility
+   :class: compatibility-large no-padding
 
    * - Ruby Driver
+     - MongoDB 4.2
      - MongoDB 4.0
      - MongoDB 3.6
      - MongoDB 3.4
@@ -27,7 +28,18 @@ MongoDB Compatibility
      - MongoDB 2.6
      - MongoDB 2.4
 
+   * - 2.10
+     - |checkmark|
+     - |checkmark|
+     - |checkmark|
+     - |checkmark|
+     - |checkmark|
+     - |checkmark|
+     - |checkmark|
+     -
+
    * - 2.9
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
@@ -37,6 +49,7 @@ MongoDB Compatibility
      -
 
    * - 2.8
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
@@ -46,6 +59,7 @@ MongoDB Compatibility
      -
 
    * - 2.7
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
@@ -55,6 +69,7 @@ MongoDB Compatibility
      -
 
    * - 2.6
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
@@ -65,6 +80,7 @@ MongoDB Compatibility
 
    * - 2.5
      -
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
@@ -73,6 +89,7 @@ MongoDB Compatibility
      -
 
    * - 2.4
+     -
      -
      -
      - |checkmark|
@@ -85,12 +102,14 @@ MongoDB Compatibility
      -
      -
      -
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
      - |checkmark|
 
    * - 2.2
+     -
      -
      -
      -
@@ -104,11 +123,13 @@ MongoDB Compatibility
      -
      -
      -
+     -
      - |checkmark|
      - |checkmark|
      - |checkmark|
 
    * - 1.12
+     -
      -
      -
      -
@@ -123,10 +144,12 @@ MongoDB Compatibility
      -
      -
      -
+     -
      - |checkmark|
      - |checkmark|
 
    * - 1.10
+     -
      -
      -
      -
@@ -142,9 +165,11 @@ MongoDB Compatibility
      -
      -
      -
+     -
      - |checkmark|
 
    * - 1.8
+     -
      -
      -
      -
@@ -165,7 +190,7 @@ Ruby Compatibility
 .. list-table::
    :header-rows: 1
    :stub-columns: 1
-   :class: compatibility
+   :class: compatibility-large no-padding
 
    * - Ruby Driver
      - Ruby 2.6
@@ -186,10 +211,10 @@ Ruby Compatibility
      - |checkmark|
      - |checkmark|
      - |checkmark|
-     - |checkmark|
-     - |checkmark|
-     - |checkmark|
-     - |checkmark|
+     - D
+     - D
+     - D
+     - D
      -
      - |checkmark|
      - |checkmark|
@@ -362,6 +387,12 @@ Ruby Compatibility
      -
      -
      - |checkmark|
+
+Support for Ruby versions less than 2.3 has been deprecated. Driver version
+2.10 will be the last release to support Ruby 1.9-2.2. As of driver version
+2.11.0, the minimum required Ruby version will be 2.3. Please note that,
+as of January 1, 2019, Ruby versions 2.2 and older are `not supported by
+the Ruby core team <https://www.ruby-lang.org/en/downloads/branches/>`_.
 
 Rails/ActiveSupport Compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

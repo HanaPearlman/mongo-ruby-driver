@@ -6,6 +6,10 @@ describe 'Server selector' do
   let(:cluster) { client.cluster }
 
   describe '#select_server' do
+    # These tests operate on specific servers, and don't work in a multi
+    # shard cluster where multiple servers are equally eligible
+    require_no_multi_shard
+
     let(:result) { selector.select_server(cluster) }
 
     it 'selects' do
@@ -13,7 +17,7 @@ describe 'Server selector' do
     end
 
     context 'no servers in the cluster' do
-      let(:client) { Mongo::Client.new([], server_selection_timeout: 2) }
+      let(:client) { new_local_client_nmio([], server_selection_timeout: 2) }
 
       it 'raises NoServerAvailable with a message explaining the situation' do
         expect do
@@ -35,7 +39,7 @@ describe 'Server selector' do
       context 'there is a known primary' do
         before do
           client.cluster.next_primary
-          client.close
+          client.close(true)
           expect(client.cluster.connected?).to be false
         end
 
@@ -47,7 +51,7 @@ describe 'Server selector' do
       context 'there is no known primary' do
         before do
           primary_server = client.cluster.next_primary
-          client.close
+          client.close(true)
           expect(client.cluster.connected?).to be false
           primary_server.unknown!
         end
@@ -62,10 +66,12 @@ describe 'Server selector' do
 
     context 'monitoring thread is dead' do
       before do
-        client.cluster.servers.first.monitor.instance_variable_get('@thread').kill
+        client.cluster.servers.each do |server|
+          server.monitor.instance_variable_get('@thread').kill
+        end
         server = client.cluster.next_primary
         if server
-          server.monitor.instance_variable_set('@description', Mongo::Server::Description.new({}))
+          server.instance_variable_set('@description', Mongo::Server::Description.new({}))
         end
       end
 

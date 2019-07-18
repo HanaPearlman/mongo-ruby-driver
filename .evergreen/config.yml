@@ -86,6 +86,8 @@ functions:
               export RETRY_READS=${RETRY_READS}
               export RETRY_WRITES=${RETRY_WRITES}
               export WITH_ACTIVE_SUPPORT="${WITH_ACTIVE_SUPPORT}"
+              export SINGLE_MONGOS="${SINGLE_MONGOS}"
+              export MMAPV1="${MMAPV1}"
            EOT
            # See what we've done
            cat expansion.yml
@@ -347,6 +349,26 @@ functions:
           ${PREPARE_SHELL}
           MONGODB_URI="${MONGODB_URI}" .evergreen/run-tests.sh
 
+  "run tests via mlaunch":
+    - command: shell.exec
+      type: test
+      params:
+        shell: bash
+        working_dir: "src"
+        script: |
+          ${PREPARE_SHELL}
+          MONGODB_URI="${MONGODB_URI}" .evergreen/run-tests-mlaunch.sh
+
+  "run local tls tests":
+    - command: shell.exec
+      type: test
+      params:
+        shell: bash
+        working_dir: "src"
+        script: |
+          ${PREPARE_SHELL}
+          MONGODB_URI="${MONGODB_URI}" .evergreen/run-local-tls-tests.sh
+
   "run enterprise auth tests":
     - command: shell.exec
       type: test
@@ -370,7 +392,7 @@ functions:
 
             ENTERPRISE_AUTH_TESTS=1 IP_ADDR=$IP_ADDR SASL_HOST=${sasl_host} SASL_PORT=${sasl_port} SASL_USER=${sasl_user} SASL_PASS=${sasl_pass} SASL_DB=${sasl_db} PRINCIPAL=${principal} KERBEROS_DB=${kerberos_db} KEYTAB_BASE64=${keytab_base64} PROJECT_DIRECTORY=${PROJECT_DIRECTORY} RVM_RUBY="${RVM_RUBY}" ${PROJECT_DIRECTORY}/.evergreen/run-enterprise-auth-tests.sh
 
-  "cleanup":
+  "cleanup mo":
     - command: shell.exec
       params:
         script: |
@@ -383,8 +405,20 @@ functions:
             . venv/Scripts/activate
           fi
           mongo-orchestration stop
-          cd -
-          rm -rf $DRIVERS_TOOLS || true
+
+  "cleanup mo if running":
+    - command: shell.exec
+      params:
+        script: |
+          ${PREPARE_SHELL}
+          cd "$MONGO_ORCHESTRATION_HOME"
+          # source the mongo-orchestration virtualenv if it exists
+          if [ -f venv/bin/activate ]; then
+            . venv/bin/activate
+          elif [ -f venv/Scripts/activate ]; then
+            . venv/Scripts/activate
+          fi
+          mongo-orchestration stop || true
 
   "fix absolute paths":
     - command: shell.exec
@@ -422,13 +456,13 @@ functions:
           echo '{"results": [{ "status": "FAIL", "test_file": "Build", "log_raw": "No test-results.json found was created"  } ]}' > ${PROJECT_DIRECTORY}/test-results.json
 
   "install dependencies":
-    type: test
-    params:
-      working_dir: "src"
-      script: |
-        ${PREPARE_SHELL}
-        file="${PROJECT_DIRECTORY}/.evergreen/install-dependencies.sh"
-        [ -f ${file} ] && sh ${file} || echo "${file} not available, skipping"
+    - command: shell.exec
+      params:
+        working_dir: "src"
+        script: |
+          ${PREPARE_SHELL}
+          file="${PROJECT_DIRECTORY}/.evergreen/install-dependencies.sh"
+          [ -f $file ] && sh $file || echo "$file not available, skipping"
 
 pre:
   - func: "fetch source"
@@ -445,7 +479,7 @@ post:
   - func: "upload mo artifacts"
   #- func: "upload test results"
   - func: "upload test results to s3"
-  - func: "cleanup"
+  - func: "cleanup mo if running"
 
 tasks:
 
@@ -464,6 +498,13 @@ tasks:
       commands:
         - func: "bootstrap mongo-orchestration"
         - func: "run tests"
+        #- func: "cleanup mo"
+    - name: "test-mlaunch"
+      commands:
+        - func: "run tests via mlaunch"
+    - name: "local-tls-tests"
+      commands:
+        - func: "run local tls tests"
     - name: "enterprise-auth-tests"
       commands:
         - func: "run enterprise auth tests"
@@ -480,6 +521,10 @@ axes:
         display_name: "4.0"
         variables:
           VERSION: "4.0"
+      - id: "4.2"
+        display_name: "4.2"
+        variables:
+          VERSION: "4.2"
       - id: "3.6"
         display_name: "3.6"
         variables:
@@ -638,6 +683,21 @@ axes:
         display_name: AS
         variables:
           WITH_ACTIVE_SUPPORT: true
+  - id: "single-mongos"
+    display_name: Single Mongos
+    values:
+      - id: "single-mongos"
+        display_name: Single Mongos
+        variables:
+          SINGLE_MONGOS: 'true'
+  - id: storage-engine
+    display_name: Storage Engine
+    values:
+      - id: mmapv1
+        display_name: MMAPv1
+        run_on: ubuntu1404-test
+        variables:
+          MMAPV1: 'true'
 
 
 buildvariants:
@@ -655,7 +715,7 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -668,7 +728,7 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -681,7 +741,21 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
+  tasks:
+     - name: "test"
+
+-
+  matrix_name: "single-mongos"
+  matrix_spec:
+    auth-and-ssl: ["auth-and-ssl", "noauth-and-nossl"]
+    ruby: "ruby-2.6"
+    mongodb-version: ["4.2", latest]
+    topology: "sharded-cluster"
+    single-mongos: single-mongos
+  display_name: "${mongodb-version} ${topology} single-mongos ${auth-and-ssl} ${ruby}"
+  run_on:
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -694,7 +768,7 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -707,7 +781,7 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${retry-reads} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -720,20 +794,33 @@ buildvariants:
     topology: [replica-set, sharded-cluster]
   display_name: "${mongodb-version} ${topology} ${retry-writes} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
+
+-
+  matrix_name: mmapv1
+  matrix_spec:
+    ruby: "ruby-2.6"
+    mongodb-version: [3.6, 4.0]
+    topology: '*'
+    storage-engine: mmapv1
+  display_name: "${mongodb-version} ${topology} mmapv1 ${ruby}"
+  run_on:
+    - rhel70-small
+  tasks:
+     - name: "test-mlaunch"
 
 -
   matrix_name: "lint"
   matrix_spec:
     lint: on
     ruby: "ruby-2.6"
-    mongodb-version: ["4.0"]
+    mongodb-version: ["4.0", "4.2"]
     topology: [replica-set, sharded-cluster]
   display_name: "${mongodb-version} ${topology} ${lint} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -746,7 +833,7 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -759,7 +846,7 @@ buildvariants:
     topology: "*"
   display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -773,7 +860,7 @@ buildvariants:
     compressor: 'zlib'
   display_name: "${compressor} ${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -787,7 +874,7 @@ buildvariants:
     compressor: 'zlib'
   display_name: "${compressor} ${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -808,7 +895,7 @@ buildvariants:
     as: as
   display_name: "AS ${mongodb-version} ${topology} ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
      - name: "test"
 
@@ -821,18 +908,31 @@ buildvariants:
     topology: replica-set
   display_name: "3.6 Replica Set with 3.4 FCV"
   run_on:
-    - ubuntu1404-test
+    - rhel70-small
   tasks:
     - name: "test"
+
+-
+  matrix_name: "local-tls"
+  matrix_spec:
+    ruby: "*"
+    mongodb-version: ['4.0', '4.2']
+    topology: standalone
+  display_name: "Local TLS ${mongodb-version} ${ruby}"
+  run_on:
+    - ubuntu1404-test
+  tasks:
+    - name: "local-tls-tests"
 
 -
   matrix_name: "enterprise-auth-tests-ubuntu"
   matrix_spec:
     auth-and-ssl: "auth-and-ssl"
-    ruby: ["ruby-2.6", "ruby-2.5", "jruby-9.1", "jruby-9.2"]
+    # Ruby 2.6 and 2.4 segfault
+    ruby: ["ruby-2.5", "jruby-9.2", "jruby-9.1"]
   display_name: "Enterprise Auth Ubuntu ${ruby}"
   run_on:
-    - ubuntu1404-test
+    - ubuntu1604-test
   tasks:
     - name: "enterprise-auth-tests"
 

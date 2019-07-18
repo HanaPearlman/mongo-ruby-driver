@@ -62,7 +62,9 @@ module Mongo
         if !server.standalone?
           cc_doc = session.send(:causal_consistency_doc)
           if cc_doc
-            selector[:readConcern] = (selector[:readConcern] || read_concern || {}).merge(cc_doc)
+            rc_doc = (selector[:readConcern] || read_concern || {}).merge(cc_doc)
+            selector[:readConcern] = Options::Mapper.transform_values_to_strings(
+              rc_doc)
           end
         end
       end
@@ -121,45 +123,55 @@ module Mongo
         session.validate_read_preference!(selector) if read_command?(selector)
       end
 
-      def update_session_state!
-        session.update_state!
-      end
-
       def command(server)
         sel = selector(server).dup
         add_write_concern!(sel)
         sel[Protocol::Msg::DATABASE_IDENTIFIER] = db_name
-        sel['$readPreference'] = read.to_doc if read
+        unless server.standalone?
+          sel['$readPreference'] = read.to_doc if read
+        end
 
         if server.features.sessions_enabled?
           apply_cluster_time!(sel, server)
           if session && (acknowledged_write? || session.in_transaction?)
-            sel[:txnNumber] = BSON::Int64.new(txn_num) if txn_num
-            apply_session_id!(sel)
-            apply_start_transaction!(sel)
-            apply_causal_consistency!(sel, server)
-            apply_autocommit!(sel)
-            apply_txn_opts!(sel)
-            suppress_read_write_concern!(sel)
-            validate_read_preference!(sel)
-            update_session_state!
-            apply_txn_num!(sel)
+            apply_session_options(sel, server)
           end
         elsif session && session.explicit?
-          apply_cluster_time!(sel, server)
-          sel[:txnNumber] = BSON::Int64.new(txn_num) if txn_num
-          apply_session_id!(sel)
-          apply_start_transaction!(sel)
-          apply_causal_consistency!(sel, server)
-          apply_autocommit!(sel)
-          apply_txn_opts!(sel)
-          suppress_read_write_concern!(sel)
-          validate_read_preference!(sel)
-          update_session_state!
-          apply_txn_num!(sel)
+          apply_session_options(sel, server)
         end
 
         sel
+      end
+
+      def apply_session_options(sel, server)
+        apply_cluster_time!(sel, server)
+        sel[:txnNumber] = BSON::Int64.new(txn_num) if txn_num
+        apply_session_id!(sel)
+        apply_start_transaction!(sel)
+        apply_causal_consistency!(sel, server)
+        apply_autocommit!(sel)
+        apply_txn_opts!(sel)
+        suppress_read_write_concern!(sel)
+        validate_read_preference!(sel)
+        apply_txn_num!(sel)
+        if session.recovery_token &&
+          (sel[:commitTransaction] || sel[:abortTransaction])
+        then
+          sel[:recoveryToken] = session.recovery_token
+        end
+      end
+
+      def build_message(server)
+        super.tap do |message|
+          if session
+            # Serialize the message to detect client-side problems,
+            # such as invalid BSON keys. The message will be serialized again
+            # later prior to being sent to the server.
+            message.serialize(BSON::ByteBuffer.new)
+
+            session.update_state!
+          end
+        end
       end
     end
   end

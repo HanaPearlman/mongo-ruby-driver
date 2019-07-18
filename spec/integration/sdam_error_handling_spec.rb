@@ -6,6 +6,11 @@ describe 'SDAM error handling' do
   end
 
   describe 'when there is an error during an operation' do
+
+    # These tests operate on specific servers, and don't work in a multi
+    # shard cluster where multiple servers are equally eligible
+    require_no_multi_shard
+
     let(:client) { authorized_client_without_any_retries }
 
     before do
@@ -15,7 +20,7 @@ describe 'SDAM error handling' do
       # have different behavior from non-handshake errors
       client.database.command(ping: 1)
       client.cluster.servers_list.each do |server|
-        server.monitor.stop!(true)
+        server.monitor.stop!
       end
     end
 
@@ -46,14 +51,14 @@ describe 'SDAM error handling' do
 
     shared_examples_for 'requests server scan' do
       it 'requests server scan' do
-        expect(server.monitor.scan_semaphore).to receive(:signal)
+        expect(server.scan_semaphore).to receive(:signal)
         operation
       end
     end
 
     shared_examples_for 'does not request server scan' do
       it 'does not request server scan' do
-        expect(server.monitor.scan_semaphore).not_to receive(:signal)
+        expect(server.scan_semaphore).not_to receive(:signal)
         operation
       end
     end

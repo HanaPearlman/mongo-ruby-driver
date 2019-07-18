@@ -1,19 +1,13 @@
-require 'spec_helper'
+require 'lite_spec_helper'
 
 describe Mongo::URI::SRVProtocol do
+  clean_slate_for_all
 
   let(:scheme) { 'mongodb+srv://' }
   let(:uri) { described_class.new(string) }
 
-  before(:all) do
-    # Since these tests assert on warnings being produced,
-    # close clients to ensure background threads do not interfere with
-    # their warnings.
-    ClientRegistry.instance.close_all_clients
-  end
-
   let(:client) do
-    new_local_client(string, monitoring_io: false)
+    new_local_client_nmio(string)
   end
 
   describe 'invalid uris' do
@@ -364,11 +358,11 @@ describe Mongo::URI::SRVProtocol do
           let(:concern) { Mongo::Options::Redacted.new(:w => 1)}
 
           it 'sets the write concern options' do
-            expect(uri.uri_options[:write]).to eq(concern)
+            expect(uri.uri_options[:write_concern]).to eq(concern)
           end
 
           it 'sets the options on a client created with the uri' do
-            expect(client.options[:write]).to eq(concern)
+            expect(client.options[:write_concern]).to eq(concern)
           end
         end
 
@@ -377,11 +371,11 @@ describe Mongo::URI::SRVProtocol do
           let(:concern) { Mongo::Options::Redacted.new(:w => :majority) }
 
           it 'sets the write concern options' do
-            expect(uri.uri_options[:write]).to eq(concern)
+            expect(uri.uri_options[:write_concern]).to eq(concern)
           end
 
           it 'sets the options on a client created with the uri' do
-            expect(client.options[:write]).to eq(concern)
+            expect(client.options[:write_concern]).to eq(concern)
           end
         end
 
@@ -390,11 +384,11 @@ describe Mongo::URI::SRVProtocol do
           let(:concern) { Mongo::Options::Redacted.new(:j => true) }
 
           it 'sets the write concern options' do
-            expect(uri.uri_options[:write]).to eq(concern)
+            expect(uri.uri_options[:write_concern]).to eq(concern)
           end
 
           it 'sets the options on a client created with the uri' do
-            expect(client.options[:write]).to eq(concern)
+            expect(client.options[:write_concern]).to eq(concern)
           end
         end
 
@@ -403,11 +397,11 @@ describe Mongo::URI::SRVProtocol do
           let(:concern) { Mongo::Options::Redacted.new(:fsync => true) }
 
           it 'sets the write concern options' do
-            expect(uri.uri_options[:write]).to eq(concern)
+            expect(uri.uri_options[:write_concern]).to eq(concern)
           end
 
           it 'sets the options on a client created with the uri' do
-            expect(client.options[:write]).to eq(concern)
+            expect(client.options[:write_concern]).to eq(concern)
           end
         end
 
@@ -417,11 +411,11 @@ describe Mongo::URI::SRVProtocol do
           let(:concern) { Mongo::Options::Redacted.new(:w => 2, :wtimeout => timeout) }
 
           it 'sets the write concern options' do
-            expect(uri.uri_options[:write]).to eq(concern)
+            expect(uri.uri_options[:write_concern]).to eq(concern)
           end
 
           it 'sets the options on a client created with the uri' do
-            expect(client.options[:write]).to eq(concern)
+            expect(client.options[:write_concern]).to eq(concern)
           end
         end
       end
@@ -581,7 +575,7 @@ describe Mongo::URI::SRVProtocol do
       end
 
       context 'replica set option provided' do
-        let(:rs_name) { TEST_SET }
+        let(:rs_name) { 'test-rs-name' }
         let(:options) { "replicaSet=#{rs_name}" }
 
         it 'sets the replica set option' do
@@ -609,7 +603,8 @@ describe Mongo::URI::SRVProtocol do
           end
 
           it 'is case-insensitive' do
-            expect(new_local_client(string.downcase).options[:auth_mech]).to eq(expected)
+            client = new_local_client_nmio(string.downcase)
+            expect(client.options[:auth_mech]).to eq(expected)
           end
         end
 
@@ -626,7 +621,8 @@ describe Mongo::URI::SRVProtocol do
           end
 
           it 'is case-insensitive' do
-            expect(new_local_client(string.downcase).options[:auth_mech]).to eq(expected)
+            client = new_local_client_nmio(string.downcase)
+            expect(client.options[:auth_mech]).to eq(expected)
           end
         end
 
@@ -643,7 +639,8 @@ describe Mongo::URI::SRVProtocol do
           end
 
           it 'is case-insensitive' do
-            expect(new_local_client(string.downcase).options[:auth_mech]).to eq(expected)
+            client = new_local_client_nmio(string.downcase)
+            expect(client.options[:auth_mech]).to eq(expected)
           end
         end
 
@@ -660,7 +657,8 @@ describe Mongo::URI::SRVProtocol do
           end
 
           it 'is case-insensitive' do
-            expect(new_local_client(string.downcase).options[:auth_mech]).to eq(expected)
+            client = new_local_client_nmio(string.downcase)
+            expect(client.options[:auth_mech]).to eq(expected)
           end
         end
 
@@ -677,14 +675,16 @@ describe Mongo::URI::SRVProtocol do
           end
 
           it 'is case-insensitive' do
-            expect(new_local_client(string.downcase).options[:auth_mech]).to eq(expected)
+              client = new_local_client_nmio(string.downcase)
+            expect(client.options[:auth_mech]).to eq(expected)
           end
 
           context 'when a username is not provided' do
 
             it 'recognizes the mechanism with no username' do
-              expect(new_local_client(string.downcase).options[:auth_mech]).to eq(expected)
-              expect(new_local_client(string.downcase).options[:user]).to be_nil
+              client = new_local_client_nmio(string.downcase)
+              expect(client.options[:auth_mech]).to eq(expected)
+              expect(client.options[:user]).to be_nil
             end
           end
         end

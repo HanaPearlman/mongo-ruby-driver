@@ -114,7 +114,6 @@ module Mongo
           @address = address
           @options = options.freeze
           @app_metadata = options[:app_metadata]
-          @ssl_options = options.reject { |k, v| !k.to_s.start_with?(SSL) }
           @socket = nil
           @pid = Process.pid
           @compressor = nil
@@ -229,6 +228,8 @@ module Mongo
             reply = Protocol::Message.deserialize(socket, Mongo::Protocol::Message::MAX_MESSAGE_SIZE).documents[0]
             set_compressor!(reply)
             reply
+          else
+            log_warn("Asked to handshake with #{address} but there was no app metadata provided")
           end
         rescue => e
           log_warn("Failed to handshake with #{address}: #{e.class}: #{e}")

@@ -102,16 +102,49 @@ module Mongo
         parse!
       end
 
+      # @return [ true | false ] Whether the document includes a write
+      #   concern error. A failure may have a top level error and a write
+      #   concern error or either one of the two.
+      #
+      # @since 2.10.0
+      # @api experimental
+      def write_concern_error?
+        !!write_concern_error_document
+      end
+
+      # @return [ Integer | nil ] The error code for the write concern error,
+      #   if a write concern error is present and has a code.
+      #
+      # @since 2.10.0
+      # @api experimental
+      def write_concern_error_code
+        write_concern_error_document && write_concern_error_document['code']
+      end
+
+      # @return [ String | nil ] The code name for the write concern error,
+      #   if a write concern error is present and has a code name.
+      #
+      # @since 2.10.0
+      # @api experimental
+      def write_concern_error_code_name
+        write_concern_error_document && write_concern_error_document['codeName']
+      end
+
       private
+
+      def write_concern_error_document
+        document['writeConcernError']
+      end
 
       def parse!
         @message = ""
         parse_single(@message, ERR)
         parse_single(@message, ERROR)
         parse_single(@message, ERRMSG)
-        parse_multiple(@message, WRITE_ERRORS)
-        parse_single(@message, ERRMSG,
-                     document[WRITE_CONCERN_ERROR]) if document[WRITE_CONCERN_ERROR]
+        parse_multiple(@message, 'writeErrors')
+        if write_concern_error_document
+          parse_single(@message, ERRMSG, write_concern_error_document)
+        end
         parse_flag(@message)
         parse_code
         parse_labels
@@ -160,7 +193,7 @@ module Mongo
         # In practice this should never be an issue as a write concern
         # can only fail after the operation succeeds on the primary.
         if @code.nil? && @code_name.nil?
-          if subdoc = document[WRITE_CONCERN_ERROR]
+          if subdoc = write_concern_error_document
             @code = subdoc['code']
             @code_name = subdoc['codeName']
           end
@@ -169,7 +202,7 @@ module Mongo
         if @code.nil? && @code_name.nil?
           # If we have writeErrors, and all of their codes are the same,
           # use that code. Otherwise don't set the code
-          if write_errors = document[WRITE_ERRORS]
+          if write_errors = document['writeErrors']
             codes = write_errors.map { |e| e['code'] }.compact
             if codes.uniq.length == 1
               @code = codes.first
@@ -185,9 +218,9 @@ module Mongo
       end
 
       def parse_wtimeout
-        @wtimeout = document[WRITE_CONCERN_ERROR] &&
-          document[WRITE_CONCERN_ERROR]['errInfo'] &&
-          document[WRITE_CONCERN_ERROR]['errInfo']['wtimeout']
+        @wtimeout = write_concern_error_document &&
+          write_concern_error_document['errInfo'] &&
+          write_concern_error_document['errInfo']['wtimeout']
       end
     end
   end

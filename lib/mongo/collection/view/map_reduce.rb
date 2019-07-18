@@ -35,6 +35,7 @@ module Mongo
         # Reroute message.
         #
         # @since 2.1.0
+        # @deprecated
         REROUTE = 'Rerouting the MapReduce operation to the primary server.'.freeze
 
         # @return [ View ] view The collection view.
@@ -67,7 +68,7 @@ module Mongo
         def each
           @cursor = nil
           session = client.send(:get_session, @options)
-          server = cluster.next_primary
+          server = cluster.next_primary(nil, session)
           result = send_initial_query(server, session)
           result = send_fetch_query(server, session) unless inline?
           @cursor = Cursor.new(view, result, server, session: session)
@@ -194,7 +195,8 @@ module Mongo
         # @since 2.5.0
         def execute
           view.send(:with_session, @options) do |session|
-            legacy_write_with_retry do |server|
+            write_concern = view.write_concern_with_session(session)
+            nro_write_with_retry(session, write_concern) do |server|
               send_initial_query(server, session)
             end
           end
@@ -232,8 +234,9 @@ module Mongo
 
         def send_initial_query(server, session)
           unless valid_server?(server)
-            log_warn(REROUTE)
-            server = cluster.next_primary(false)
+            msg = "Rerouting the MapReduce operation to the primary server - #{server.summary} is not suitable"
+            log_warn(msg)
+            server = cluster.next_primary(nil, session)
           end
           validate_collation!(server)
           initial_query_op(session).execute(server)

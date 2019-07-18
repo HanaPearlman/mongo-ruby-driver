@@ -15,11 +15,11 @@
 require 'support/gridfs'
 require 'support/crud/requirement'
 require 'support/crud/spec'
+require 'support/crud/test_base'
 require 'support/crud/test'
 require 'support/crud/outcome'
+require 'support/crud/context'
 require 'support/crud/operation'
-require 'support/crud/read'
-require 'support/crud/write'
 require 'support/crud/verifier'
 
 def crud_execute_operations(spec, test, num_ops, event_subscriber, expect_error,
@@ -42,7 +42,7 @@ def crud_execute_operations(spec, test, num_ops, event_subscriber, expect_error,
     result = if expect_error.nil?
       res = nil
       begin
-        res = test.run(spec, client, num_ops)
+        res = test.run(client, num_ops)
       rescue => e
         res = e
       end
@@ -50,13 +50,13 @@ def crud_execute_operations(spec, test, num_ops, event_subscriber, expect_error,
     elsif expect_error
       error = nil
       begin
-        test.run(spec, client, num_ops)
+        test.run(client, num_ops)
       rescue => e
         error = e
       end
       error
     else
-      test.run(spec, client, num_ops)
+      test.run(client, num_ops)
     end
 
     $crud_event_cache ||= {}
@@ -203,17 +203,14 @@ def define_spec_tests_with_requirements(spec, &block)
   end
 end
 
-def define_crud_spec_tests(description, test_paths, &block)
-  describe(description) do
+def define_crud_spec_tests(test_paths, spec_cls = Mongo::CRUD::Spec, &block)
+  test_paths.each do |path|
 
-    test_paths.each do |path|
+    spec = spec_cls.new(path)
 
-      spec = Mongo::CRUD::Spec.new(path)
-
-      context(spec.description) do
-        define_spec_tests_with_requirements(spec) do |req|
-          define_crud_spec_test_examples(spec, req, &block)
-        end
+    context(spec.description) do
+      define_spec_tests_with_requirements(spec) do |req|
+        define_crud_spec_test_examples(spec, req, &block)
       end
     end
   end

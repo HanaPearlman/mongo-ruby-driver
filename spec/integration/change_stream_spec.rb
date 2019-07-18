@@ -5,6 +5,7 @@ describe 'Change stream integration', retry: 4 do
   max_example_run_time 7
   min_server_fcv '3.6'
   require_topology :replica_set
+  require_wired_tiger
 
   let(:fail_point_base_command) do
     { 'configureFailPoint' => "failCommand" }
@@ -42,6 +43,25 @@ describe 'Change stream integration', retry: 4 do
         expect(doc['_id']).to be_a(BSON::ObjectId)
         doc.delete('_id')
         expect(doc).to eql('a' => 1)
+      end
+    end
+
+    shared_examples_for 'raises an exception' do
+      it 'raises an exception and does not attempt to resume' do
+        change_stream
+
+        subscriber = EventSubscriber.new
+        authorized_client.subscribe(Mongo::Monitoring::COMMAND, subscriber)
+
+        expect do
+          change_stream.to_enum.next
+        end.to raise_error(Mongo::Error::OperationFailure)
+
+        aggregate_commands = subscriber.started_events.select { |e| e.command_name == 'aggregate' }
+        expect(aggregate_commands.length).to be 0
+
+        get_more_commands = subscriber.started_events.select { |e| e.command_name == 'getMore' }
+        expect(get_more_commands.length).to be 1
       end
     end
 
@@ -86,10 +106,36 @@ describe 'Change stream integration', retry: 4 do
         before do
           authorized_collection.client.use(:admin).command(fail_point_base_command.merge(
             :mode => {:times => 1},
-            :data => {:failCommands => ['getMore'], errorCode: 100}))
+            :data => {:failCommands => ['getMore'], errorCode: errorCode}))
         end
 
-        it_behaves_like 'returns a change document'
+        context 'when the error is resumable' do
+          let(:errorCode) do
+            100
+          end
+          it_behaves_like 'returns a change document'
+        end
+
+        context 'when the error is Interrupted' do
+          let(:errorCode) do
+            11601
+          end
+          it_behaves_like 'raises an exception'
+        end
+
+        context 'when the error is CappedPositionLost' do
+          let(:errorCode) do
+            136
+          end
+          it_behaves_like 'raises an exception'
+        end
+
+        context 'when the error is CursorKilled' do
+          let(:errorCode) do
+            237
+          end
+          it_behaves_like 'raises an exception'
+        end
       end
 
       context 'error on a getMore other than first' do
@@ -105,10 +151,36 @@ describe 'Change stream integration', retry: 4 do
 
           authorized_collection.client.use(:admin).command(fail_point_base_command.merge(
             :mode => {:times => 1},
-            :data => {:failCommands => ['getMore'], errorCode: 100}))
+            :data => {:failCommands => ['getMore'], errorCode: errorCode}))
         end
 
-        it_behaves_like 'returns a change document'
+        context 'when the error is resumable' do
+          let(:errorCode) do
+            100
+          end
+          it_behaves_like 'returns a change document'
+        end
+
+        context 'when the error is Interrupted' do
+          let(:errorCode) do
+            11601
+          end
+          it_behaves_like 'raises an exception'
+        end
+
+        context 'when the error is CappedPositionLost' do
+          let(:errorCode) do
+            136
+          end
+          it_behaves_like 'raises an exception'
+        end
+
+        context 'when the error is CursorKilled' do
+          let(:errorCode) do
+            237
+          end
+          it_behaves_like 'raises an exception'
+        end
       end
     end
 
@@ -369,7 +441,7 @@ describe 'Change stream integration', retry: 4 do
 
   describe ':start_after option' do
     require_topology :replica_set
-    min_server_version '4.1'
+    min_server_fcv '4.2'
 
     let(:start_after) do
       stream = authorized_collection.watch([])
@@ -427,6 +499,234 @@ describe 'Change stream integration', retry: 4 do
         expect(command['pipeline'].size == 1).to eq(true)
         expect(command['pipeline'].first.key?('$changeStream')).to eq(true)
         expect(command['pipeline'].first['$changeStream'].key?('startAfter')).to eq(false)
+      end
+    end
+  end
+
+  describe 'resume_token' do
+    let(:stream) { authorized_collection.watch }
+
+    let(:events) do
+      subscriber = EventSubscriber.new
+      authorized_client.subscribe(Mongo::Monitoring::COMMAND, subscriber)
+      use_stream
+      subscriber.succeeded_events.select { |e|
+        e.command_name == 'aggregate' || e.command_name === 'getMore'
+      }
+    end
+
+    let!(:sample_resume_token) do
+      cs = authorized_collection.watch
+      authorized_collection.insert_one(a: 1)
+      doc = cs.to_enum.next
+      cs.close
+      doc[:_id]
+    end
+
+    let(:use_stream) do
+      stream
+      authorized_collection.insert_one(x: 1)
+      stream.to_enum.next
+    end
+
+    context 'when batch has been emptied' do
+      context '4.2+' do
+        min_server_fcv '4.2'
+        it 'returns post batch resume token from current command response' do
+          expect(events.size).to eq(2)
+
+          aggregate_response = events.first.reply
+          get_more_response = events.last.reply
+          expect(aggregate_response['cursor'].key?('postBatchResumeToken')).to eq(true)
+          expect(get_more_response['cursor'].key?('postBatchResumeToken')).to eq(true)
+
+          res_tok = stream.resume_token
+          expect(res_tok).to eq(get_more_response['cursor']['postBatchResumeToken'])
+          expect(res_tok).to_not eq(aggregate_response['cursor']['postBatchResumeToken'])
+        end
+      end
+
+      context '4.0-' do
+        max_server_version '4.0'
+
+        it 'returns _id of previous document returned if one exists' do
+          doc = use_stream
+          expect(stream.resume_token).to eq(doc['_id'])
+        end
+
+        context 'when start_after is specified' do
+          min_server_fcv '4.2'
+
+          it 'must return startAfter from the initial aggregate if the option was specified' do
+            start_after = sample_resume_token
+            authorized_collection.insert_one(:a => 1)
+            stream = authorized_collection.watch([], { start_after: start_after })
+
+            expect(stream.resume_token).to eq(start_after)
+          end
+        end
+
+        it 'must return resumeAfter from the initial aggregate if the option was specified' do
+          resume_after = sample_resume_token
+          authorized_collection.insert_one(:a => 1)
+          stream = authorized_collection.watch([], { resume_after: resume_after })
+
+          expect(stream.resume_token).to eq(resume_after)
+        end
+
+        it 'must be empty if neither the startAfter nor resumeAfter options were specified' do
+          authorized_collection.insert_one(:a => 1)
+          stream = authorized_collection.watch
+
+          expect(stream.resume_token).to be(nil)
+        end
+      end
+    end
+
+    context 'before batch has been emptied' do
+      it 'returns _id of previous document returned' do
+        stream
+
+        authorized_collection.insert_one(:a => 1)
+        authorized_collection.insert_one(:a => 1)
+        authorized_collection.insert_one(:a => 1)
+        stream.to_enum.next
+
+        change = stream.to_enum.next
+
+        expect(stream.resume_token).to eq(change['_id'])
+      end
+    end
+
+    # Note that the watch method executes the initial aggregate command
+    context 'for non-empty, non-iterated batch, only the initial aggregate command executed' do
+
+      let (:use_stream) do
+        authorized_collection.insert_one(:a => 1)
+        stream
+      end
+
+      context 'if startAfter was specified' do
+        min_server_fcv '4.2'
+
+        let (:stream) do
+          authorized_collection.watch([], { start_after: sample_resume_token })
+        end
+
+        it 'must return startAfter from the initial aggregate' do
+          # Need to sample a doc id from the stream before we use the stream, so
+          # the events subscriber does not record these commands as part of the example.
+          sample_resume_token
+
+          # Verify that only the initial aggregate command was executed
+          expect(events.size).to eq(1)
+          expect(events.first.command_name).to eq('aggregate')
+          expect(stream.resume_token).to eq(sample_resume_token)
+        end
+      end
+
+      context 'if resumeAfter was specified' do
+        let (:stream) do
+          authorized_collection.watch([], { resume_after: sample_resume_token })
+        end
+
+        it 'must return resumeAfter from the initial aggregate' do
+          sample_resume_token
+
+          expect(events.size).to eq(1)
+          expect(events.first.command_name).to eq('aggregate')
+          expect(stream.resume_token).to eq(sample_resume_token)
+        end
+      end
+
+      context 'if neither the startAfter nor resumeAfter options were specified' do
+        it 'must be empty' do
+          expect(events.size).to eq(1)
+          expect(events.first.command_name).to eq('aggregate')
+          expect(stream.resume_token).to be(nil)
+        end
+      end
+    end
+
+
+    context 'for non-empty, non-iterated batch directly after get_more' do
+      let(:next_doc) do
+        authorized_collection.insert_one(:a => 1)
+        stream.to_enum.next
+      end
+
+      let(:do_get_more) do
+        authorized_collection.insert_one(:a => 1)
+        stream.instance_variable_get('@cursor').get_more
+      end
+
+      context '4.2+' do
+        min_server_fcv '4.2'
+
+        let(:use_stream) do
+          stream
+          next_doc
+          do_get_more
+        end
+
+        it 'returns post batch resume token from previous command response' do
+          expect(events.size).to eq(3)
+
+          expect(events.last.command_name).to eq('getMore')
+
+          first_get_more = events[1].reply
+          second_get_more = events[2].reply
+          expect(first_get_more['cursor'].key?('postBatchResumeToken')).to eq(true)
+          expect(second_get_more['cursor'].key?('postBatchResumeToken')).to eq(true)
+
+          res_tok = stream.resume_token
+          expect(res_tok).to eq(first_get_more['cursor']['postBatchResumeToken'])
+          expect(res_tok).not_to eq(second_get_more['cursor']['postBatchResumeToken'])
+        end
+      end
+
+      context '4.0-' do
+        max_server_version '4.0'
+
+        context 'if a document was returned' do
+          let(:use_stream) do
+            stream
+            next_doc
+            do_get_more
+          end
+
+          it 'returns _id of previous document' do
+            expect(events.last.command_name).to eq('getMore')
+            expect(stream.resume_token).to eq(next_doc['_id'])
+          end
+        end
+
+        context 'if a document was not returned' do
+          let(:use_stream) do
+            stream
+            do_get_more
+          end
+
+          context 'when resumeAfter is specified' do
+            let (:stream) do
+              authorized_collection.watch([], { resume_after: sample_resume_token })
+            end
+
+            it 'must return resumeAfter from the initial aggregate if the option was specified' do
+              sample_resume_token
+
+              expect(events.last.command_name).to eq('getMore')
+              expect(stream.resume_token).to eq(sample_resume_token)
+            end
+          end
+
+          context 'if neither the startAfter nor resumeAfter options were specified' do
+            it 'must be empty' do
+              expect(events.last.command_name).to eq('getMore')
+              expect(stream.resume_token).to be(nil)
+            end
+          end
+        end
       end
     end
   end

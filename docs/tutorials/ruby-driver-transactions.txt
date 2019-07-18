@@ -28,7 +28,7 @@ helper method:
 
   session = client.start_session
   session.with_transaction do
-    collection.insert_one(hello: 'world')
+    collection.insert_one({hello: 'world'}, session: session)
   end
 
 The ``with_transaction`` helper does the following:
@@ -71,7 +71,7 @@ which are read concern, write concern and read preference:
     write_concern: {w: 3},
     read: {mode: :primary}
   ) do
-    collection.insert_one(hello: 'world')
+    collection.insert_one({hello: 'world'}, session: session)
   end
 
 
@@ -156,7 +156,7 @@ if it fails. Here is the Ruby code to do so:
   begin
     session.commit_transaction
   rescue Mongo::Error => e
-    if e.label?(Mongo::Error::UNKNOWN_TRANSACTION_COMMIT_RESULT_LABEL)
+    if e.label?('UnknownTransactionCommitResult')
       retry
     else
       raise

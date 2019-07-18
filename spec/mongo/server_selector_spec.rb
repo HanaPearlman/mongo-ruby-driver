@@ -341,7 +341,7 @@ describe Mongo::ServerSelector do
         Mongo::Error::UnsupportedFeatures.new('Test UnsupportedFeatures')
       end
 
-      let(:selector) { described_class.get(mode: :primary) }
+      let(:selector) { described_class.primary }
 
       it 'raises Error::UnsupportedFeatures' do
         expect(topology).to receive(:compatible?).and_return(false)
@@ -349,6 +349,38 @@ describe Mongo::ServerSelector do
         expect do
           selector.select_server(cluster)
         end.to raise_error(Mongo::Error::UnsupportedFeatures, 'Test UnsupportedFeatures')
+      end
+    end
+
+    context 'sharded topology' do
+
+      let(:cluster) do
+        double('cluster').tap do |c|
+          allow(c).to receive(:connected?).and_return(true)
+          allow(c).to receive(:summary)
+          allow(c).to receive(:topology).and_return(topology)
+          allow(c).to receive(:servers).and_return(servers)
+          allow(c).to receive(:addresses).and_return(servers.map(&:address))
+          allow(c).to receive(:replica_set?).and_return(false)
+          allow(c).to receive(:single?).and_return(false)
+          allow(c).to receive(:sharded?).and_return(true)
+          allow(c).to receive(:unknown?).and_return(false)
+          allow(c).to receive(:scan!)
+          allow(c).to receive(:options).and_return(local_threshold: 0.050)
+          allow(topology).to receive(:compatible?).and_return(true)
+          allow(topology).to receive(:single?).and_return(false)
+        end
+      end
+
+      context 'unknown and mongos' do
+        let(:mongos) { make_server(:mongos, address: Mongo::Address.new('localhost')) }
+        let(:unknown) { make_server(:unknown, address: Mongo::Address.new('localhost')) }
+        let(:servers) { [unknown, mongos] }
+        let(:selector) { described_class.primary }
+
+        it 'returns the mongos' do
+          expect(selector.select_server(cluster)).to eq(mongos)
+        end
       end
     end
   end
@@ -378,7 +410,7 @@ describe Mongo::ServerSelector do
       end
 
       let(:read_pref) do
-        described_class.get(mode: :primary)
+        described_class.primary
       end
 
       it 'raises a NoServerAvailable error' do

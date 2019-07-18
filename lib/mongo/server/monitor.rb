@@ -15,14 +15,18 @@
 module Mongo
   class Server
 
-    # This object is responsible for keeping server status up to date, running in
-    # a separate thread as to not disrupt other operations.
+    # Responsible for periodically polling a server via ismaster commands to
+    # keep the server's status up to date.
+    #
+    # Does all work in a background thread so as to not interfere with other
+    # operations performed by the driver.
     #
     # @since 2.0.0
     class Monitor
       include Loggable
       extend Forwardable
       include Event::Publisher
+      include BackgroundThread
 
       # The default time for a server to refresh its status is 10 seconds.
       #
@@ -48,45 +52,43 @@ module Mongo
       #
       # @note Monitor must never be directly instantiated outside of a Server.
       #
-      # @param [ Address ] address The address to monitor.
+      # @param [ Server ] server The server to monitor.
       # @param [ Event::Listeners ] event_listeners The event listeners.
       # @param [ Monitoring ] monitoring The monitoring..
       # @param [ Hash ] options The options.
-      # @option options [ Float ] :heartbeat_frequency The interval, in seconds,
-      #   between server description refreshes via ismaster.
+      #
+      # @option options [ Float ] :connect_timeout The timeout, in seconds, to
+      #   use when establishing the monitoring connection.
+      # @option options [ Float ] :socket_timeout The timeout, in seconds, to
+      #   execute operations on the monitoring connection.
       #
       # @since 2.0.0
       # @api private
-      def initialize(address, event_listeners, monitoring, options = {})
+      def initialize(server, event_listeners, monitoring, options = {})
         unless monitoring.is_a?(Monitoring)
           raise ArgumentError, "Wrong monitoring type: #{monitoring.inspect}"
         end
-        @description = Description.new(address, {})
+        @server = server
         @event_listeners = event_listeners
         @monitoring = monitoring
         @options = options.freeze
-        @round_trip_time_averager = RoundTripTimeAverager.new
-        @scan_semaphore = Semaphore.new
         # This is a Mongo::Server::Monitor::Connection
-        @connection = Connection.new(address, options)
-        @last_scan = nil
+        @connection = Connection.new(server.address, options)
         @mutex = Mutex.new
       end
+
+      # @return [ Server ] server The server that this monitor is monitoring.
+      # @api private
+      attr_reader :server
 
       # @return [ Mongo::Server::Monitor::Connection ] connection The connection to use.
       attr_reader :connection
 
-      # @return [ Server::Description ] description The server
-      #   description the monitor refreshes.
-      attr_reader :description
-
       # @return [ Hash ] options The server options.
       attr_reader :options
 
-      # @return [ Time ] last_scan The time when the last server scan started.
-      #
-      # @since 2.4.0
-      attr_reader :last_scan
+      # @deprecated
+      def_delegators :server, :last_scan
 
       # The compressor is determined during the handshake, so it must be an attribute
       # of the connection.
@@ -98,18 +100,13 @@ module Mongo
       # Get the refresh interval for the server. This will be defined via an
       # option or will default to 10.
       #
-      # @example Get the refresh interval.
-      #   server.heartbeat_frequency
-      #
-      # @return [ Integer ] The heartbeat frequency, in seconds.
+      # @return [ Float ] The heartbeat interval, in seconds.
       #
       # @since 2.0.0
+      # @deprecated
       def heartbeat_frequency
-        @heartbeat_frequency ||= options[:heartbeat_frequency] || HEARTBEAT_FREQUENCY
+        server.cluster.heartbeat_interval
       end
-
-      # @api private
-      attr_reader :scan_semaphore
 
       # Runs the server monitor. Refreshing happens on a separate thread per
       # server.
@@ -120,13 +117,26 @@ module Mongo
       # @return [ Thread ] The thread the monitor runs on.
       #
       # @since 2.0.0
-      def run!
-        @thread = Thread.new(heartbeat_frequency) do |i|
-          loop do
-            scan!
-            @scan_semaphore.wait(i)
-          end
-        end
+      def do_work
+        scan!
+        server.scan_semaphore.wait(server.cluster.heartbeat_interval)
+      end
+
+      def pre_stop
+        server.scan_semaphore.signal
+      end
+
+      def stop!
+        super
+
+        # Although disconnect! documentation implies a possibility of
+        # failure, all of our disconnects always return true.
+        #
+        # Important: disconnect should happen after the background thread
+        # terminated.
+        connection.disconnect!
+
+        true
       end
 
       # Perform a check of the server with throttling, and update
@@ -141,6 +151,9 @@ module Mongo
       # @note If the system clock is set to a time in the past, this method
       #   can sleep for a very long time.
       #
+      # @note The return value of this method is deprecated. In version 3.0.0
+      #   this method will not have a return value.
+      #
       # @example Run a scan.
       #   monitor.scan!
       #
@@ -150,55 +163,10 @@ module Mongo
       def scan!
         throttle_scan_frequency!
         result = ismaster
-        new_description = Description.new(description.address, result,
-          @round_trip_time_averager.average_round_trip_time)
-        publish(Event::DESCRIPTION_CHANGED, description, new_description)
-        # If this server's response has a mismatched me, or for other reasons,
-        # this server may be removed from topology. When this happens the
-        # monitor thread gets killed. As a result, any code after the publish
-        # call may not run in a particular monitor instance, hence there
-        # shouldn't be any code here.
-        @description = new_description
-        # This call can be after the publish event because if the
-        # monitoring thread gets killed the server is closed and no client
-        # should be waiting for it
-        if options[:server_selection_semaphore]
-          options[:server_selection_semaphore].broadcast
-        end
-        @description
-      end
-
-      # Stops the server monitor. Kills the thread so it doesn't continue
-      # taking memory and sending commands to the connection.
-      #
-      # @example Stop the monitor.
-      #   monitor.stop!
-      #
-      # @param [ Boolean ] wait Whether to wait for background threads to
-      #   finish running.
-      #
-      # @return [ Boolean ] Is the thread stopped?
-      #
-      # @since 2.0.0
-      def stop!(wait=false)
-        # Although disconnect! documentation implies a possibility of
-        # failure, all of our disconnects always return true
-        if connection.disconnect!
-          if @thread
-            @thread.kill
-            if wait
-              @thread.join
-              @thread = nil
-              true
-            else
-              !@thread.alive?
-            end
-          else
-            true
-          end
-        else
-          false
-        end
+        new_description = Description.new(server.address, result,
+          server.round_trip_time_averager.average_round_trip_time)
+        server.cluster.run_sdam_flow(server.description, new_description)
+        server.description
       end
 
       # Restarts the server monitor unless the current thread is alive.
@@ -217,9 +185,6 @@ module Mongo
         end
       end
 
-      # @api private
-      attr_reader :round_trip_time_averager
-
       private
 
       def ismaster
@@ -227,19 +192,19 @@ module Mongo
           if monitoring.monitoring?
             monitoring.started(
               Monitoring::SERVER_HEARTBEAT,
-              Monitoring::Event::ServerHeartbeatStarted.new(description.address)
+              Monitoring::Event::ServerHeartbeatStarted.new(server.address)
             )
           end
 
-          result, exc, rtt, average_rtt = round_trip_time_averager.measure do
+          result, exc, rtt, average_rtt = server.round_trip_time_averager.measure do
             connection.ismaster
           end
           if exc
-            log_debug("Error running ismaster on #{description.address}: #{exc.message}")
+            log_debug("Error running ismaster on #{server.address}: #{exc.message}")
             if monitoring.monitoring?
               monitoring.failed(
                 Monitoring::SERVER_HEARTBEAT,
-                Monitoring::Event::ServerHeartbeatFailed.new(description.address, rtt, exc)
+                Monitoring::Event::ServerHeartbeatFailed.new(server.address, rtt, exc)
               )
             end
             result = {}
@@ -247,7 +212,7 @@ module Mongo
             if monitoring.monitoring?
               monitoring.succeeded(
                 Monitoring::SERVER_HEARTBEAT,
-                Monitoring::Event::ServerHeartbeatSucceeded.new(description.address, rtt)
+                Monitoring::Event::ServerHeartbeatSucceeded.new(server.address, rtt)
               )
             end
           end
@@ -258,12 +223,12 @@ module Mongo
       # @note If the system clock is set to a time in the past, this method
       #   can sleep for a very long time.
       def throttle_scan_frequency!
-        if @last_scan
-          difference = (Time.now - @last_scan)
+        if server.last_scan
+          difference = (Time.now - server.last_scan)
           throttle_time = (MIN_SCAN_FREQUENCY - difference)
           sleep(throttle_time) if throttle_time > 0
         end
-        @last_scan = Time.now
+        server.update_last_scan
       end
     end
   end

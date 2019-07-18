@@ -23,7 +23,7 @@ require 'mongo/bulk_write/result_combiner'
 module Mongo
   class BulkWrite
     extend Forwardable
-    include Retryable
+    include Operation::Unpinnable
 
     # @return [ Mongo::Collection ] collection The collection.
     attr_reader :collection
@@ -38,6 +38,8 @@ module Mongo
     def_delegators :@collection,
                    :database,
                    :cluster,
+                   :write_with_retry,
+                   :nro_write_with_retry,
                    :next_primary
 
     def_delegators :database, :client
@@ -58,6 +60,7 @@ module Mongo
       client.send(:with_session, @options) do |session|
         operations.each do |operation|
           if single_statement?(operation)
+            write_concern = write_concern(session)
             write_with_retry(session, write_concern) do |server, txn_num|
               execute_operation(
                   operation.keys.first,
@@ -69,7 +72,7 @@ module Mongo
                   txn_num)
             end
           else
-            legacy_write_with_retry do |server|
+            nro_write_with_retry(session, write_concern) do |server|
               execute_operation(
                   operation.keys.first,
                   operation.values.flatten,
@@ -139,9 +142,10 @@ module Mongo
     # @return [ WriteConcern ] The write concern.
     #
     # @since 2.1.0
-    def write_concern
+    def write_concern(session = nil)
       @write_concern ||= options[:write_concern] ?
-        WriteConcern.get(options[:write_concern]) : collection.write_concern
+        WriteConcern.get(options[:write_concern]) :
+        collection.write_concern_with_session(session)
     end
 
     private
@@ -158,7 +162,7 @@ module Mongo
       {
         :db_name => database.name,
         :coll_name => collection.name,
-        :write_concern => write_concern,
+        :write_concern => write_concern(session),
         :ordered => ordered?,
         :operation_id => operation_id,
         :bypass_document_validation => !!options[:bypass_document_validation],
@@ -171,15 +175,17 @@ module Mongo
     def execute_operation(name, values, server, operation_id, result_combiner, session, txn_num = nil)
       raise Error::UnsupportedCollation.new if op_combiner.has_collation && !server.features.collation_enabled?
       raise Error::UnsupportedArrayFilters.new if op_combiner.has_array_filters && !server.features.array_filters_enabled?
-      begin
+      unpin_maybe(session) do
         if values.size > server.max_write_batch_size
           split_execute(name, values, server, operation_id, result_combiner, session, txn_num)
         else
           result = send(name, values, server, operation_id, session, txn_num)
           result_combiner.combine!(result, values.size)
         end
-      rescue Error::MaxBSONSize, Error::MaxMessageSize => e
-        raise e if values.size <= 1
+      end
+    rescue Error::MaxBSONSize, Error::MaxMessageSize => e
+      raise e if values.size <= 1
+      unpin_maybe(session) do
         split_execute(name, values, server, operation_id, result_combiner, session, txn_num)
       end
     end

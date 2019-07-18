@@ -93,7 +93,6 @@ module Mongo
         @monitoring = server.monitoring
         @options = options.freeze
         @server = server
-        @ssl_options = options.select { |k, v| k.to_s.start_with?(SSL) }.freeze
         @socket = nil
         @last_checkin = nil
         @auth_mechanism = nil
@@ -176,9 +175,16 @@ module Mongo
       def do_connect
         socket = address.socket(socket_timeout, ssl_options,
           connect_timeout: address.connect_timeout)
-        handshake!(socket)
-        pending_connection = PendingConnection.new(socket, @server, monitoring, options)
-        authenticate!(pending_connection)
+
+        begin
+          handshake!(socket)
+          pending_connection = PendingConnection.new(socket, @server, monitoring, options)
+          authenticate!(pending_connection)
+        rescue Exception
+          socket.close
+          raise
+        end
+
         socket
       end
       private :do_connect
@@ -291,7 +297,7 @@ module Mongo
         @server.handle_handshake_failure! do
           begin
             response, exc, rtt, average_rtt =
-              @server.monitor.round_trip_time_averager.measure do
+              @server.round_trip_time_averager.measure do
                 socket.write(app_metadata.ismaster_bytes)
                 Protocol::Message.deserialize(socket, max_message_size).documents[0]
               end
@@ -343,7 +349,7 @@ module Mongo
         end
 
         new_description = Description.new(address, response, average_rtt)
-        @server.monitor.publish(Event::DESCRIPTION_CHANGED, @server.description, new_description)
+        @server.cluster.run_sdam_flow(@server.description, new_description)
       end
 
       def authenticate!(pending_connection)

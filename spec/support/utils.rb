@@ -3,7 +3,7 @@ module Utils
   # Converts a 'camelCase' string or symbol to a :under_score symbol.
   def underscore(str)
     str = str.to_s
-    str = str[0].downcase + str[1...str.length].gsub(/([A-Z])/) { |m| "_#{m.downcase}" }
+    str = str[0].downcase + str[1...str.length].gsub(/([A-Z]+)/) { |m| "_#{m.downcase}" }
     str.to_sym
   end
   module_function :underscore
@@ -23,22 +23,22 @@ module Utils
   end
   module_function :snakeize_hash
 
+  def camelize(str, upcase_first = true)
+    str = str.gsub(%r,_(\w),) { |m| m[1].upcase }
+    if upcase_first
+      str = str[0].upcase + str[1...str.length]
+    end
+    str
+  end
+  module_function :camelize
+
   # Converts camel case clientOptions, as used in spec tests,
   # to Ruby driver underscore options.
   def convert_client_options(spec_test_options)
-    spec_test_options.reduce({}) do |opts, kv|
-      case kv.first
-      when 'readConcernLevel'
-        kv = [:read_concern, { 'level' => kv.last }]
-      when 'readPreference'
-        kv = [:read, { 'mode' => kv.last }]
-      when 'w'
-        kv = [:write, { w: kv.last }]
-      else
-        kv[0] = underscore(kv[0])
-      end
-
-      opts.tap { |o| o[kv.first] = kv.last }
+    uri = Mongo::URI.new('mongodb://localhost')
+    spec_test_options.reduce({}) do |opts, (name, value)|
+      uri.send(:add_uri_option, name, value.to_s, opts)
+      opts
     end
   end
   module_function :convert_client_options
@@ -87,6 +87,10 @@ module Utils
         end
       end
 
+      if command['recoveryToken']
+        command['recoveryToken'] = 42
+      end
+
       # The spec tests use 42 as a placeholder value for any getMore cursorId.
       command['getMore'] = { '$numberLong' => '42' } if command['getMore']
 
@@ -120,4 +124,51 @@ module Utils
     events
   end
   module_function :yamlify_command_events
+
+  def convert_operation_options(options)
+    if options
+      Hash[options.map do |k, v|
+        out_v = case k
+        when 'readPreference'
+          out_k = :read
+          out_v = {}
+          v.each do |sub_k, sub_v|
+            if sub_k == 'mode'
+              out_v[:mode] = Utils.underscore(v['mode'])
+            else
+              out_v[sub_k.to_sym] = sub_v
+            end
+          end
+          out_v
+        when 'defaultTransactionOptions'
+          out_k = Utils.underscore(k).to_sym
+          convert_operation_options(v)
+        when 'readConcern'
+          out_k = Utils.underscore(k).to_sym
+          Mongo::Options::Mapper.transform_keys_to_symbols(v).tap do |out|
+            if out[:level]
+              out[:level] = out[:level].to_sym
+            end
+          end
+        when 'causalConsistency'
+          out_k = Utils.underscore(k).to_sym
+          v
+        when 'writeConcern'
+          # Write concern option is called :write on the client, but
+          # :write_concern on all levels below the client.
+          out_k = :write_concern
+          # The client expects write concern value to only have symbol keys.
+          Hash[v.map do |sub_k, sub_v|
+            [sub_k.to_sym, sub_v]
+          end]
+        else
+          raise "Unhandled operation option #{k}"
+        end
+        [out_k, out_v]
+      end]
+    else
+      {}
+    end
+  end
+  module_function :convert_operation_options
 end

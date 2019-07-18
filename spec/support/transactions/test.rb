@@ -18,7 +18,7 @@ module Mongo
     # Represents a single transaction test.
     #
     # @since 2.6.0
-    class TransactionsTest
+    class TransactionsTest < CRUD::CRUDTestBase
 
       # The test description.
       #
@@ -42,41 +42,67 @@ module Mongo
       # @example Create the test.
       #   TransactionTest.new(data, test)
       #
+      # @param [ Crud::Spec ] crud_spec The top level YAML specification object.
       # @param [ Array<Hash> ] data The documents the collection
       # must have before the test runs.
       # @param [ Hash ] test The test specification.
-      # @param [ Hash ] spec The top level YAML specification.
       #
       # @since 2.6.0
-      def initialize(data, test, spec)
+      def initialize(crud_spec, data, test)
         test = IceNine.deep_freeze(test)
-        @spec = spec
+        @spec = crud_spec
         @data = data
         @description = test['description']
         @client_options = Utils.convert_client_options(test['clientOptions'] || {})
-        @session_options = Utils.snakeize_hash(test['sessionOptions'] || {})
+        @session_options = if opts = test['sessionOptions']
+          Hash[opts.map do |session_name, options|
+            [session_name.to_sym, Utils.convert_operation_options(options)]
+          end]
+        else
+          {}
+        end
         @fail_point = test['failPoint']
-        @operations = test['operations']
-        @expectations = test['expectations']
         @skip_reason = test['skipReason']
+        @multiple_mongoses = test['useMultipleMongoses']
+
+        @operations = test['operations']
+        @ops = @operations.map do |op|
+          Operation.new(self, op)
+        end
+
+        @expectations = test['expectations']
         if test['outcome']
           @outcome = Mongo::CRUD::Outcome.new(test['outcome'])
         end
         @expected_results = @operations.map do |o|
-          result = o['result']
-          next result unless result.class == Hash
+          # We check both o.key('error') and o['error'] to provide a better
+          # error message in case error: false is ever needed in the tests
+          if o.key?('error')
+            if o['error']
+              {'error' => true}
+            else
+              raise "Unsupported error value #{o['error']}"
+            end
+          else
+            result = o['result']
+            next result unless result.class == Hash
 
-          # Change maps of result ids to arrays of ids
-          result.dup.tap do |r|
-            r.each do |k, v|
-              next unless ['insertedIds', 'upsertedIds'].include?(k)
-              r[k] = v.to_a.sort_by(&:first).map(&:last)
+            # Change maps of result ids to arrays of ids
+            result.dup.tap do |r|
+              r.each do |k, v|
+                next unless ['insertedIds', 'upsertedIds'].include?(k)
+                r[k] = v.to_a.sort_by(&:first).map(&:last)
+              end
             end
           end
         end
       end
 
       attr_reader :outcome
+
+      def multiple_mongoses?
+        @multiple_mongoses
+      end
 
       def support_client
         @support_client ||= ClientRegistry.instance.global_client('root_authorized').use(@spec.database_name)
@@ -87,14 +113,30 @@ module Mongo
       end
 
       def test_client
-        @test_client ||= ClientRegistry.instance.global_client('authorized_without_retry_writes').with(
-          @client_options.merge(
-            database: @spec.database_name,
-            app_name: 'this is used solely to force the new client to create its own cluster'))
+        @test_client ||= ClientRegistry.instance.global_client(
+          'authorized_without_retry_writes'
+        ).with(@client_options.merge(
+          database: @spec.database_name,
+        ))
       end
 
       def event_subscriber
         @event_subscriber ||= EventSubscriber.new
+      end
+
+      def mongos_each_direct_client
+        if ClusterConfig.instance.topology == :sharded
+          client = ClientRegistry.instance.global_client('basic')
+          client.cluster.next_primary
+          client.cluster.servers.each do |server|
+            direct_client = ClientRegistry.instance.new_local_client(
+              [server.address.to_s],
+              SpecConfig.instance.test_options.merge(
+                connect: :sharded
+              ).merge(SpecConfig.instance.auth_options))
+            yield direct_client
+          end
+        end
       end
 
       # Run the test.
@@ -108,23 +150,9 @@ module Mongo
       def run
         test_client.subscribe(Mongo::Monitoring::COMMAND, event_subscriber)
 
-        $distinct_ran ||= if @ops.any? { |op| op.name == 'distinct' }
-          if ClusterConfig.instance.mongos?
-            client = ClientRegistry.instance.global_client('basic')
-            client.cluster.next_primary
-            client.cluster.servers.each do |server|
-              direct_client = ClientRegistry.instance.new_local_client(
-                [server.address.to_s],
-                SpecConfig.instance.test_options.merge(
-                  connect: :sharded
-                ).merge(SpecConfig.instance.auth_options))
-              direct_client['test'].distinct('foo').to_a
-            end
-          end
-        end
-
         results = @ops.map do |op|
-          op.execute(@collection)
+          target = resolve_target(test_client, op)
+          op.execute(target, @session0, @session1)
         end
 
         session0_id = @session0.session_id
@@ -134,6 +162,9 @@ module Mongo
         @session1.end_session
 
         actual_events = Utils.yamlify_command_events(event_subscriber.started_events)
+        actual_events = actual_events.reject do |event|
+          event['command_started_event']['command']['endSessions']
+        end
         actual_events.each do |e|
 
           # Replace the session id placeholders with the actual session ids.
@@ -143,13 +174,12 @@ module Mongo
 
         end
 
-        if @fail_point
-          admin_support_client.command(configureFailPoint: 'failCommand', mode: 'off')
-        end
-
         @results = {
           results: results,
-          contents: @collection.with(read_concern: { level: 'local' }).find.to_a,
+          contents: @collection.with(
+          read: {mode: 'primary'},
+            read_concern: { level: 'local' },
+          ).find.to_a,
           events: actual_events,
         }
       end
@@ -160,30 +190,61 @@ module Mongo
         rescue Mongo::Error
         end
 
-        coll = support_client[@spec.collection_name]
+        mongos_each_direct_client do |direct_client|
+          direct_client.command(configureFailPoint: 'failCommand', mode: 'off')
+        end
+
+        coll = support_client[@spec.collection_name].with(write: { w: :majority })
         coll.drop
-        coll.with(write: { w: :majority }).drop
         support_client.command(create: @spec.collection_name, writeConcern: { w: :majority })
 
-        coll.with(write: { w: :majority }).insert_many(@data) unless @data.empty?
+        coll.insert_many(@data) unless @data.empty?
+
+        $distinct_ran ||= if description =~ /distinct/ || @ops.any? { |op| op.name == 'distinct' }
+          mongos_each_direct_client do |direct_client|
+            direct_client['test'].distinct('foo').to_a
+          end
+        end
+
         admin_support_client.command(@fail_point) if @fail_point
 
         @collection = test_client[@spec.collection_name]
 
         @session0 = test_client.start_session(@session_options[:session0] || {})
         @session1 = test_client.start_session(@session_options[:session1] || {})
-
-        @ops = @operations.map do |op|
-          Operation.new(op, @session0, @session1)
-        end
       end
 
       def teardown_test
-        if @admin_support_client
-          @admin_support_client.close
+
+        if @fail_point
+          admin_support_client.command(configureFailPoint: 'failCommand', mode: 'off')
         end
+
+        if $disable_fail_points
+          $disable_fail_points.each do |(fail_point, address)|
+            client = ClusterTools.instance.direct_client(address,
+              database: 'admin')
+            client.command(configureFailPoint: fail_point['configureFailPoint'],
+              mode: 'off')
+          end
+        end
+
         if @test_client
-          @test_client.close
+          @test_client.cluster.session_pool.end_sessions
+        end
+      end
+
+      def resolve_target(client, operation)
+        case operation.object
+        when 'session0'
+          @session0
+        when 'session1'
+          @session1
+        when 'testRunner'
+          # We don't actually use this target in any way.
+          nil
+        else
+          super
         end
       end
     end

@@ -27,25 +27,52 @@ describe Mongo::Cursor do
       authorized_collection.insert_many(documents)
     end
 
+    shared_context 'with initialized pool' do
+      before do
+        ClientRegistry.instance.close_all_clients
+
+        # These tests really like creating pools (and thus scheduling
+        # the pools' finalizers) when querying collections.
+        # Deal with this by pre-creating pools for all known servers.
+        cluster = authorized_collection.client.cluster
+        cluster.next_primary
+        cluster.servers_list.each do |server|
+          server.pool
+        end
+      end
+    end
+
     context 'cursor exhausted by initial result' do
+      include_context 'with initialized pool'
+
       let(:view) do
         Mongo::Collection::View.new(authorized_collection)
       end
 
       it 'does not schedule the finalizer' do
-        expect(ObjectSpace).not_to receive(:define_finalizer)
-        cursor
+        # Due to https://jira.mongodb.org/browse/RUBY-1772, restrict
+        # the scope of the assertion
+        RSpec::Mocks.with_temporary_scope do
+          expect(ObjectSpace).not_to receive(:define_finalizer)
+          cursor
+        end
       end
     end
 
     context 'cursor not exhausted by initial result' do
+      include_context 'with initialized pool'
+
       let(:view) do
         Mongo::Collection::View.new(authorized_collection, {}, batch_size: 2)
       end
 
       it 'schedules the finalizer' do
-        expect(ObjectSpace).to receive(:define_finalizer)
-        cursor
+        # Due to https://jira.mongodb.org/browse/RUBY-1772, restrict
+        # the scope of the assertion
+        RSpec::Mocks.with_temporary_scope do
+          expect(ObjectSpace).to receive(:define_finalizer)
+          cursor
+        end
       end
     end
   end
@@ -273,7 +300,7 @@ describe Mongo::Cursor do
     context 'when the cursor is not fully iterated and is garbage collected' do
 
       let(:documents) do
-        (1..3).map{ |i| { field: "test#{i}" }}
+        (1..6).map{ |i| { field: "test#{i}" }}
       end
 
       let(:cluster) do
@@ -304,14 +331,35 @@ describe Mongo::Cursor do
         cluster.instance_variable_get(:@periodic_executor).flush
         expect {
           cursor.to_a
-        }.to raise_exception(Mongo::Error::OperationFailure)
+        }.to raise_exception(Mongo::Error::OperationFailure, /[cC]ursor.*not found/)
       end
 
       context 'when the cursor is unregistered before the kill cursors operations are executed' do
 
         it 'does not send a kill cursors operation for the unregistered cursor' do
+          # We need to verify that the cursor was able to retrieve more documents
+          # from the server so that more than one batch is successfully received
+
           cluster.unregister_cursor(cursor.id)
-          expect(cursor.to_a.size).to eq(documents.size)
+
+          # The initial read is done on an enum obtained from the cursor.
+          # The read below is done directly on the cursor. These are two
+          # different objects. In MRI, iterating like this yields all of the
+          # documents, hence we retrieved one document in the setup and
+          # we expect to retrieve the remaining 5 here. In JRuby it appears that
+          # the enum may buffers the first batch, such that the second document
+          # sometimes is lost to the iteration and we retrieve 4 documents below.
+          # But sometimes we get all 5 documents. In either case, all of the
+          # documents are retrieved via two batches thus fulfilling the
+          # requirement of the test to continue iterating the cursor.
+
+          if BSON::Environment.jruby?
+            expected_counts = [4, 5]
+          else
+            expected_counts = [5]
+          end
+
+          expect(expected_counts).to include(cursor.to_a.size)
         end
       end
     end

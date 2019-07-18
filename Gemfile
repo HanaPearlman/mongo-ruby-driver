@@ -40,9 +40,16 @@ group :testing do
   gem 'timecop'
   gem 'ice_nine'
   gem 'rspec-retry'
+  if RUBY_VERSION >= '2.3'
+    gem 'rspec-mocks', github: 'p-mongo/rspec-mocks', branch: 'args-history'
+  end
   gem 'rfc'
   gem 'fuubar'
   gem 'timeout-interrupt', platforms: :mri
+  
+  if RUBY_VERSION < '2.3'
+    gem 'ffi', '<1.11'
+  end
 end
 
 group :development do

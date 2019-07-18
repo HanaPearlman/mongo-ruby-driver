@@ -20,10 +20,20 @@ module Mongo
     # @since 2.5.2
     module Executable
 
+      def do_execute(server)
+        unpin_maybe(session) do
+          add_error_labels do
+            get_result(server).tap do |result|
+              process_result(result, server)
+            end
+          end
+        end
+      end
+
       def execute(server)
-        result = get_result(server)
-        process_result(result, server)
-        result.validate!
+        do_execute(server).tap do |result|
+          validate_result(result)
+        end
       end
 
       private
@@ -39,8 +49,12 @@ module Mongo
       # Returns a Protocol::Message or nil
       def dispatch_message(server)
         server.with_connection do |connection|
-          connection.dispatch([ message(server) ], operation_id)
+          connection.dispatch([ build_message(server) ], operation_id)
         end
+      end
+
+      def build_message(server)
+        message(server)
       end
 
       def process_result(result, server)
@@ -61,7 +75,7 @@ module Mongo
             server.pool.disconnect!
           end
 
-          server.monitor.scan_semaphore.signal
+          server.scan_semaphore.signal
         end
 
         session.process(result) if session

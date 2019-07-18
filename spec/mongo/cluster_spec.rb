@@ -74,7 +74,7 @@ describe Mongo::Cluster do
   describe '#has_readable_server?' do
 
     let(:selector) do
-      Mongo::ServerSelector.get(mode: :primary)
+      Mongo::ServerSelector.primary
     end
 
     it 'delegates to the topology' do
@@ -92,7 +92,7 @@ describe Mongo::Cluster do
   describe '#inspect' do
 
     let(:preference) do
-      Mongo::ServerSelector.get(ServerSelector::PRIMARY)
+      Mongo::ServerSelector.primary
     end
 
     it 'displays the cluster seeds and topology' do
@@ -104,7 +104,7 @@ describe Mongo::Cluster do
   describe '#replica_set_name' do
 
     let(:preference) do
-      Mongo::ServerSelector.get(ServerSelector::PRIMARY)
+      Mongo::ServerSelector.primary
     end
 
     context 'when the option is provided' do
@@ -141,15 +141,22 @@ describe Mongo::Cluster do
   describe '#scan!' do
 
     let(:preference) do
-      Mongo::ServerSelector.get(ServerSelector::PRIMARY)
+      Mongo::ServerSelector.primary
     end
 
     let(:known_servers) do
       cluster.instance_variable_get(:@servers)
     end
 
+    let(:server) { known_servers.first }
+
+    let(:monitor) do
+      double('monitor')
+    end
+
     before do
-      expect(known_servers.first).to receive(:scan!).and_call_original
+      expect(server).to receive(:monitor).at_least(:once).and_return(monitor)
+      expect(monitor).to receive(:scan!)
     end
 
     it 'returns true' do
@@ -648,7 +655,7 @@ describe Mongo::Cluster do
       let(:client_options) { {} }
 
       let(:client) do
-        Mongo::Client.new(['127.0.0.1:27017'], {monitoring_io: false}.update(client_options))
+        new_local_client_nmio(['127.0.0.1:27017'], client_options)
       end
 
       let(:cluster) do

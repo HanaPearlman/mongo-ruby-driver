@@ -72,7 +72,7 @@ module Constraints
     require_topology :replica_set
   end
 
-  def require_ssl
+  def require_tls
     before do
       unless SpecConfig.instance.ssl?
         skip "SSL not enabled"
@@ -80,7 +80,7 @@ module Constraints
     end
   end
 
-  def require_no_ssl
+  def require_no_tls
     before do
       if SpecConfig.instance.ssl?
         skip "SSL enabled"
@@ -89,11 +89,7 @@ module Constraints
   end
 
   def require_local_tls
-    before do
-      unless SpecConfig.instance.ssl? && !SpecConfig.instance.ci?
-        skip 'Not running locally with TLS enabled'
-      end
-    end
+    require_tls
   end
 
   def require_no_retry_writes
@@ -158,6 +154,40 @@ module Constraints
     before do
       if ClusterConfig.instance.topology == :sharded && ClusterConfig.instance.short_server_version >= '4.0'
         skip "mongos 4.0+ overrides write concern"
+      end
+    end
+  end
+
+  def require_no_multi_shard
+    before do
+      if ClusterConfig.instance.topology == :sharded && SpecConfig.instance.addresses.length > 1
+        skip 'Test requires a single shard if run in sharded topology'
+      end
+    end
+  end
+
+  def require_wired_tiger
+    before(:all) do
+      if ClusterConfig.instance.storage_engine != :wired_tiger
+        skip 'Test requires WiredTiger storage engine'
+      end
+    end
+  end
+
+  def require_wired_tiger_on_36
+    before(:all) do
+      if ClusterConfig.instance.short_server_version >= '3.6'
+        if ClusterConfig.instance.storage_engine != :wired_tiger
+          skip 'Test requires WiredTiger storage engine on 3.6+ servers'
+        end
+      end
+    end
+  end
+
+  def require_mmapv1
+    before do
+      if ClusterConfig.instance.storage_engine != :mmapv1
+        skip 'Test requires MMAPv1 storage engine'
       end
     end
   end

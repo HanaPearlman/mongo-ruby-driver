@@ -13,6 +13,12 @@ require 'spec_helper'
 describe 'Retryable writes integration tests' do
   include PrimarySocket
 
+  require_wired_tiger_on_36
+
+  # These tests override server selector, which fails if there are multiple
+  # eligible servers as would be the case in a multi-shard sharded cluster
+  require_no_multi_shard
+
   before do
     authorized_collection.delete_many
   end
@@ -114,8 +120,8 @@ describe 'Retryable writes integration tests' do
       context 'when the selected server does not support retryable writes' do
 
         before do
-          legacy_primary = double('legacy primary', :'retry_writes?' => false)
-          allow(client.cluster).to receive(:next_primary).and_return(primary_server, legacy_primary)
+          legacy_primary = double('legacy primary', :retry_writes? => false)
+          expect(collection).to receive(:select_server).and_return(primary_server, legacy_primary)
           expect(primary_socket).to receive(:write).and_raise(error)
         end
 
