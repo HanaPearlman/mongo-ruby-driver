@@ -47,7 +47,7 @@ functions:
            export DRIVERS_TOOLS="$(pwd)/../drivers-tools"
 
            # Python has cygwin path problems on Windows. Detect prospective mongo-orchestration home directory
-           if [ "Windows_NT" == "$OS" ]; then # Magic variable in cygwin
+           if [ "Windows_NT" = "$OS" ]; then # Magic variable in cygwin
               export DRIVERS_TOOLS=$(cygpath -m $DRIVERS_TOOLS)
            fi
 
@@ -75,6 +75,12 @@ functions:
               export TMPDIR="$MONGO_ORCHESTRATION_HOME/db"
               export PATH="$MONGODB_BINARIES:$PATH"
               export PROJECT="${project}"
+              export ATLAS_REPLICA_SET_URI="${atlas_replica_set_uri}"
+              export ATLAS_SHARDED_URI="${atlas_sharded_uri}"
+              export ATLAS_FREE_TIER_URI="${atlas_free_tier_uri}"
+              export ATLAS_TLS11_URI="${atlas_tls11_uri}"
+              export ATLAS_TLS12_URI="${atlas_tls12_uri}"
+              export RVM_RUBY="${RVM_RUBY}"
            EOT
            # See what we've done
            cat expansion.yml
@@ -320,7 +326,7 @@ functions:
         working_dir: "src"
         script: |
           ${PREPARE_SHELL}
-          AUTH=${AUTH} SSL=${SSL} MONGODB_URI="${MONGODB_URI}" TOPOLOGY=${TOPOLOGY} RVM_RUBY="${RVM_RUBY}" .evergreen/run-tests.sh
+          AUTH=${AUTH} SSL=${SSL} MONGODB_URI="${MONGODB_URI}" TOPOLOGY=${TOPOLOGY} RVM_RUBY="${RVM_RUBY}" MONGODB_VERSION=${VERSION} ATLAS_REPLICA_SET_URI=${atlas_replica_set_uri} ATLAS_SHARDED_URI=${atlas_sharded_uri} ATLAS_FREE_TIER_URI=${atlas_free_tier_uri} ATLAS_TLS11_URI=${atlas_tls11_uri} ATLAS_TLS12_URI=${atlas_tls12_uri} .evergreen/run-atlas-tests.sh
 
   "cleanup":
     - command: shell.exec
@@ -391,12 +397,47 @@ pre:
   - func: "make files executable"
   - func: "install dependencies"
 
-post:
-  # Removed, causing timeouts
-  # - func: "upload working dir"
-  - func: "upload mo artifacts"
-  - func: "upload test results"
-  - func: "cleanup"
+axes:
+  - id: "ruby"
+    display_name: Ruby Version
+    values:
+      - id: "ruby-1.9"
+        display_name: ruby-1.9
+        variables:
+          RVM_RUBY: "ruby-1.9"
+      - id: "ruby-2.3"
+        display_name: ruby-2.3
+        variables:
+          RVM_RUBY: "ruby-2.3"
+      - id: "ruby-2.4"
+        display_name: ruby-2.4
+        variables:
+          RVM_RUBY: "ruby-2.4"
+      - id: "ruby-2.5"
+        display_name: ruby-2.5
+        variables:
+          RVM_RUBY: "ruby-2.5"
+      - id: "ruby-2.6"
+        display_name: ruby-2.6
+        variables:
+          RVM_RUBY: "ruby-2.6"
+      - id: "jruby-9.1"
+        display_name: jruby-9.1
+        variables:
+          RVM_RUBY: "jruby-9.1"
+      - id: "jruby-9.2"
+        display_name: jruby-9.2
+        variables:
+          RVM_RUBY: "jruby-9.2"
+
+buildvariants:
+  - matrix_name: "all"
+    matrix_spec: { ruby: '*' }
+    #matrix_spec: { }
+    run_on:
+      - ubuntu1604-test
+    tasks:
+       - name: "test"
 
 tasks:
 
@@ -413,143 +454,4 @@ tasks:
 #        - variant: "static-checks"
 #          name: "static-analysis"
       commands:
-        - func: "bootstrap mongo-orchestration"
         - func: "run tests"
-
-axes:
-  - id: "mongodb-version"
-    display_name: MongoDB Version
-    values:
-      - id: "latest"
-        display_name: "latest"
-        variables:
-           VERSION: "latest"
-      - id: "3.6"
-        display_name: "3.6"
-        variables:
-           VERSION: "3.6"
-      - id: "3.4"
-        display_name: "3.4"
-        variables:
-           VERSION: "3.4"
-      - id: "3.2"
-        display_name: "3.2"
-        variables:
-           VERSION: "3.2"
-      - id: "3.0"
-        display_name: "3.0"
-        variables:
-           VERSION: "3.0"
-      - id: "2.6"
-        display_name: "2.6"
-        variables:
-           VERSION: "2.6"
-
-  - id: "topology"
-    display_name: Topology
-    values:
-      - id: "standalone"
-        display_name: Standalone
-        variables:
-           TOPOLOGY: "server"
-      - id: "replicaset"
-        display_name: Replica Set
-        variables:
-           TOPOLOGY: "replica_set"
-      - id: "sharded-cluster"
-        display_name: Sharded
-        variables:
-           TOPOLOGY: "sharded_cluster"
-  - id: "auth"
-    display_name: Authentication
-    values:
-      - id: "auth"
-        display_name: Auth
-        variables:
-           AUTH: "auth"
-      - id: "noauth"
-        display_name: NoAuth
-        variables:
-           AUTH: "noauth"
-  - id: "ssl"
-    display_name: SSL
-    values:
-      - id: "ssl"
-        display_name: SSL
-        variables:
-           SSL: "ssl"
-      - id: "nossl"
-        display_name: NoSSL
-        variables:
-           SSL: "nossl"
-  - id: "ruby"
-    display_name: Ruby Version
-    values:
-      - id: "ruby-1.9"
-        display_name: ruby-1.9
-        variables:
-           RVM_RUBY: "ruby-1.9"
-      - id: "ruby-2.3"
-        display_name: ruby-2.3
-        variables:
-           RVM_RUBY: "ruby-2.3"
-      - id: "ruby-2.4"
-        display_name: ruby-2.4
-        variables:
-           RVM_RUBY: "ruby-2.4"
-      - id: "ruby-2.5.0"
-        display_name: ruby-2.5.0
-        variables:
-           RVM_RUBY: "ruby-2.5.0"
-#      - id: "jruby-1.7"
-#        display_name: jruby-1.7
-#        variables:
-#           RVM_RUBY: "jruby-1.7"
-#      - id: "jruby-9.1"
-#        display_name: jruby-9.1
-#        variables:
-#           RVM_RUBY: "jruby-9.1"
-  - id: "os"
-    display_name: OS
-    values:
-      - id: ubuntu1204-test
-        display_name: "Ubuntu 12.04"
-        run_on: ubuntu1204-test
-
-      - id: ubuntu-14.04
-        display_name: "Ubuntu 14.04"
-        run_on: ubuntu1404-test
-
-      - id: rhel70
-        display_name: "RHEL 7.0"
-        run_on: rhel70-small
-  - id: "compressor"
-    display_name: Compressor
-    values:
-      - id: "zlib"
-        display_name: Zlib
-        variables:
-           COMPRESSOR: "zlib"
-
-
-buildvariants:
-#- matrix_name: "all-os-all-ruby-auth-nossl-standalone"
-#  matrix_spec: { auth: "auth", ssl: "nossl", ruby: "*", mongodb-version: "*", topology: "standalone", os: "*" }
-#  display_name: "${version} ${topology} ${auth} ${ssl} ${ruby} ${os}"
-#  tasks:
-#     - name: "test"
-- matrix_name: "rhel70-all-mongodbs-all-rubies-all-topologies-all-auth-all-ssl"
-  matrix_spec: { auth: "*", ssl: "*", ruby: "*", mongodb-version: "*", topology: "*" }
-  display_name: "${mongodb-version} ${topology} ${auth} ${ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
-- matrix_name: "rhel70-latest-all-rubies-all-topologies-all-auth-all-ssl-compression"
-  matrix_spec: { auth: "*", ssl: "*", ruby: "*", mongodb-version: "3.6", topology: "*", compressor: 'zlib' }
-  display_name: "${compressor} ${topology} ${auth} ${ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
