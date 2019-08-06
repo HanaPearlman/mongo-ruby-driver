@@ -22,7 +22,6 @@ timeout:
     params:
       script: |
         ls -la
-
 functions:
   "fetch source":
     # Executes git clone and applies the submitted patch, if any
@@ -43,19 +42,15 @@ functions:
            else
               CURRENT_VERSION=latest
            fi
-
            export DRIVERS_TOOLS="$(pwd)/../drivers-tools"
-
            # Python has cygwin path problems on Windows. Detect prospective mongo-orchestration home directory
-           if [ "Windows_NT" = "$OS" ]; then # Magic variable in cygwin
+           if [ "Windows_NT" == "$OS" ]; then # Magic variable in cygwin
               export DRIVERS_TOOLS=$(cygpath -m $DRIVERS_TOOLS)
            fi
-
            export MONGO_ORCHESTRATION_HOME="$DRIVERS_TOOLS/.evergreen/orchestration"
            export MONGODB_BINARIES="$DRIVERS_TOOLS/mongodb/bin"
            export UPLOAD_BUCKET="${project}"
            export PROJECT_DIRECTORY="$(pwd)"
-
            cat <<EOT > expansion.yml
            CURRENT_VERSION: "$CURRENT_VERSION"
            DRIVERS_TOOLS: "$DRIVERS_TOOLS"
@@ -71,27 +66,12 @@ functions:
               export MONGODB_BINARIES="$MONGODB_BINARIES"
               export UPLOAD_BUCKET="$UPLOAD_BUCKET"
               export PROJECT_DIRECTORY="$PROJECT_DIRECTORY"
-
               export TMPDIR="$MONGO_ORCHESTRATION_HOME/db"
               export PATH="$MONGODB_BINARIES:$PATH"
               export PROJECT="${project}"
-              
-              export AUTH=${AUTH}
-              export SSL=${SSL}
-              export TOPOLOGY=${TOPOLOGY}
-              export RVM_RUBY="${RVM_RUBY}"
-              export MONGODB_VERSION=${VERSION}
-              export FCV=${FCV}
-              export MONGO_RUBY_DRIVER_LINT=${LINT}
-              export RETRY_READS=${RETRY_READS}
-              export RETRY_WRITES=${RETRY_WRITES}
-              export WITH_ACTIVE_SUPPORT="${WITH_ACTIVE_SUPPORT}"
-              export SINGLE_MONGOS="${SINGLE_MONGOS}"
-              export MMAPV1="${MMAPV1}"
            EOT
            # See what we've done
            cat expansion.yml
-
     # Load the expansion file to make an evergreen variable with the current unique version
     - command: expansions.update
       params:
@@ -110,7 +90,6 @@ functions:
             git clone git://github.com/mongodb-labs/drivers-evergreen-tools.git $DRIVERS_TOOLS
           fi
           echo "{ \"releases\": { \"default\": \"$MONGODB_BINARIES\" }}" > $MONGO_ORCHESTRATION_HOME/orchestration.config
-
   "upload release":
     - command: s3.put
       params:
@@ -171,7 +150,6 @@ functions:
         script: |
           ${PREPARE_SHELL}
           [ -f ${PROJECT_DIRECTORY}/${file} ] && BUILDTOOL="${buildtool}" sh ${PROJECT_DIRECTORY}/${file} || echo "${PROJECT_DIRECTORY}/${file} not available, skipping"
-
   "exec script" :
     - command: shell.exec
       type: test
@@ -180,7 +158,6 @@ functions:
         script: |
           ${PREPARE_SHELL}
           [ -f ${PROJECT_DIRECTORY}/${file} ] && sh ${PROJECT_DIRECTORY}/${file} || echo "${PROJECT_DIRECTORY}/${file} not available, skipping"
-
   "upload docs" :
     - command: shell.exec
       params:
@@ -309,24 +286,10 @@ functions:
         content_type: ${content_type|application/x-gzip}
         display_name: "drivers-dir.tar.gz"
 
-  "upload test results to s3":
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        # src is the relative path to repo checkout,
-        # This is specified in this yaml file earlier.
-        local_file: ./src/tmp/rspec.json
-        display_name: rspec.json
-        remote_file: ${UPLOAD_BUCKET}/${build_variant}/${revision}/${version_id}/${build_id}/artifacts/${task_id}-${execution}-rspec.json
-        content_type: application/json
-        permissions: public-read
-        bucket: mciuploads
-
   "upload test results":
     - command: attach.xunit_results
       params:
-        file: ./src/tmp/rspec.xml
+        file: ./src/*/build/test-results/TEST-*.xml
 
   "bootstrap mongo-orchestration":
     - command: shell.exec
@@ -347,52 +310,8 @@ functions:
         working_dir: "src"
         script: |
           ${PREPARE_SHELL}
-          MONGODB_URI="${MONGODB_URI}" .evergreen/run-tests.sh
-
-  "run tests via mlaunch":
-    - command: shell.exec
-      type: test
-      params:
-        shell: bash
-        working_dir: "src"
-        script: |
-          ${PREPARE_SHELL}
-          MONGODB_URI="${MONGODB_URI}" .evergreen/run-tests-mlaunch.sh
-
-  "run local tls tests":
-    - command: shell.exec
-      type: test
-      params:
-        shell: bash
-        working_dir: "src"
-        script: |
-          ${PREPARE_SHELL}
-          MONGODB_URI="${MONGODB_URI}" .evergreen/run-local-tls-tests.sh
-
-  "run enterprise auth tests":
-    - command: shell.exec
-      type: test
-      params:
-        shell: bash
-        working_dir: "src"
-        script: |
-            # DO NOT ECHO WITH XTRACE (which PREPARE_SHELL does)
-            case "$OS" in
-              cygwin*)
-                 IP_ADDR=`getent hosts ${sasl_host} | head -n 1 | awk '{print $1}'`
-                 ;;
-
-              darwin)
-                 IP_ADDR=`dig ${sasl_host} +short | tail -1`
-                 ;;
-
-              *)
-                 IP_ADDR=`getent hosts ${sasl_host} | head -n 1 | awk '{print $1}'`
-            esac
-
-            ENTERPRISE_AUTH_TESTS=1 IP_ADDR=$IP_ADDR SASL_HOST=${sasl_host} SASL_PORT=${sasl_port} SASL_USER=${sasl_user} SASL_PASS=${sasl_pass} SASL_DB=${sasl_db} PRINCIPAL=${principal} KERBEROS_DB=${kerberos_db} KEYTAB_BASE64=${keytab_base64} PROJECT_DIRECTORY=${PROJECT_DIRECTORY} RVM_RUBY="${RVM_RUBY}" ${PROJECT_DIRECTORY}/.evergreen/run-enterprise-auth-tests.sh
-
-  "cleanup mo":
+          AUTH=${AUTH} SSL=${SSL} MONGODB_URI="${MONGODB_URI}" TOPOLOGY=${TOPOLOGY} RVM_RUBY="${RVM_RUBY}" .evergreen/run-tests.sh
+  "cleanup":
     - command: shell.exec
       params:
         script: |
@@ -405,21 +324,8 @@ functions:
             . venv/Scripts/activate
           fi
           mongo-orchestration stop
-
-  "cleanup mo if running":
-    - command: shell.exec
-      params:
-        script: |
-          ${PREPARE_SHELL}
-          cd "$MONGO_ORCHESTRATION_HOME"
-          # source the mongo-orchestration virtualenv if it exists
-          if [ -f venv/bin/activate ]; then
-            . venv/bin/activate
-          elif [ -f venv/Scripts/activate ]; then
-            . venv/Scripts/activate
-          fi
-          mongo-orchestration stop || true
-
+          cd -
+          rm -rf $DRIVERS_TOOLS || true
   "fix absolute paths":
     - command: shell.exec
       params:
@@ -428,7 +334,6 @@ functions:
           for filename in $(find ${DRIVERS_TOOLS} -name \*.json); do
             perl -p -i -e "s|ABSOLUTE_PATH_REPLACEMENT_TOKEN|${DRIVERS_TOOLS}|g" $filename
           done
-
   "windows fix":
     - command: shell.exec
       params:
@@ -438,7 +343,6 @@ functions:
             cat $i | tr -d '\r' > $i.new
             mv $i.new $i
           done
-
   "make files executable":
     - command: shell.exec
       params:
@@ -447,23 +351,20 @@ functions:
           for i in $(find ${DRIVERS_TOOLS}/.evergreen ${PROJECT_DIRECTORY}/.evergreen -name \*.sh); do
             chmod +x $i
           done
-
   "init test-results":
     - command: shell.exec
       params:
         script: |
           ${PREPARE_SHELL}
           echo '{"results": [{ "status": "FAIL", "test_file": "Build", "log_raw": "No test-results.json found was created"  } ]}' > ${PROJECT_DIRECTORY}/test-results.json
-
   "install dependencies":
-    - command: shell.exec
-      params:
-        working_dir: "src"
-        script: |
-          ${PREPARE_SHELL}
-          file="${PROJECT_DIRECTORY}/.evergreen/install-dependencies.sh"
-          [ -f $file ] && sh $file || echo "$file not available, skipping"
-
+    type: test
+    params:
+      working_dir: "src"
+      script: |
+        ${PREPARE_SHELL}
+        file="${PROJECT_DIRECTORY}/.evergreen/install-dependencies.sh"
+        [ -f ${file} ] && sh ${file} || echo "${file} not available, skipping"
 pre:
   - func: "fetch source"
   - func: "prepare resources"
@@ -477,9 +378,8 @@ post:
   # Removed, causing timeouts
   # - func: "upload working dir"
   - func: "upload mo artifacts"
-  #- func: "upload test results"
-  - func: "upload test results to s3"
-  - func: "cleanup mo if running"
+  - func: "upload test results"
+  - func: "cleanup"
 
 tasks:
 
@@ -498,16 +398,6 @@ tasks:
       commands:
         - func: "bootstrap mongo-orchestration"
         - func: "run tests"
-        #- func: "cleanup mo"
-    - name: "test-mlaunch"
-      commands:
-        - func: "run tests via mlaunch"
-    - name: "local-tls-tests"
-      commands:
-        - func: "run local tls tests"
-    - name: "enterprise-auth-tests"
-      commands:
-        - func: "run enterprise auth tests"
 
 axes:
   - id: "mongodb-version"
@@ -520,15 +410,7 @@ axes:
       - id: "4.0"
         display_name: "4.0"
         variables:
-          VERSION: "4.0"
-      - id: "4.2"
-        display_name: "4.2"
-        variables:
-          VERSION: "4.2"
-      - id: "3.6"
-        display_name: "3.6"
-        variables:
-           VERSION: "3.6"
+           VERSION: "4.0"
       - id: "3.4"
         display_name: "3.4"
         variables:
@@ -545,13 +427,6 @@ axes:
         display_name: "2.6"
         variables:
            VERSION: "2.6"
-  - id: fcv
-    display_name: FCV
-    values:
-      - id: '3.4'
-        display_name: '3.4'
-        variables:
-          FCV: '3.4'
 
   - id: "topology"
     display_name: Topology
@@ -560,7 +435,7 @@ axes:
         display_name: Standalone
         variables:
            TOPOLOGY: "server"
-      - id: "replica-set"
+      - id: "replicaset"
         display_name: Replica Set
         variables:
            TOPOLOGY: "replica_set"
@@ -568,28 +443,27 @@ axes:
         display_name: Sharded
         variables:
            TOPOLOGY: "sharded_cluster"
-  - id: "auth-and-ssl"
-    display_name: Authentication and SSL
+  - id: "auth"
+    display_name: Authentication
     values:
-      - id: "auth-and-ssl"
-        display_name: Auth SSL
+      - id: "auth"
+        display_name: Auth
         variables:
            AUTH: "auth"
-           SSL: "ssl"
-      - id: "auth-and-nossl"
-        display_name: Auth NoSSL
-        variables:
-           AUTH: "auth"
-           SSL: "nossl"
-      - id: "noauth-and-ssl"
-        display_name: NoAuth SSL
+      - id: "noauth"
+        display_name: NoAuth
         variables:
            AUTH: "noauth"
-           SSL: "ssl"
-      - id: "noauth-and-nossl"
-        display_name: NoAuth NoSSL
+  - id: "ssl"
+    display_name: SSL
+    values:
+      - id: "ssl"
+        display_name: SSL
         variables:
-           AUTH: "noauth"
+           SSL: "ssl"
+      - id: "nossl"
+        display_name: NoSSL
+        variables:
            SSL: "nossl"
   - id: "ruby"
     display_name: Ruby Version
@@ -598,10 +472,6 @@ axes:
         display_name: ruby-1.9
         variables:
            RVM_RUBY: "ruby-1.9"
-      - id: "ruby-2.2"
-        display_name: ruby-2.2
-        variables:
-           RVM_RUBY: "ruby-2.2"
       - id: "ruby-2.3"
         display_name: ruby-2.3
         variables:
@@ -610,30 +480,18 @@ axes:
         display_name: ruby-2.4
         variables:
            RVM_RUBY: "ruby-2.4"
-      - id: "ruby-2.5"
-        display_name: ruby-2.5
+      - id: "ruby-2.5.0"
+        display_name: ruby-2.5.0
         variables:
-           RVM_RUBY: "ruby-2.5"
-      - id: "ruby-2.6"
-        display_name: ruby-2.6
-        variables:
-           RVM_RUBY: "ruby-2.6"
-      - id: "ruby-head"
-        display_name: ruby-head
-        variables:
-           RVM_RUBY: "ruby-head"
+           RVM_RUBY: "ruby-2.5.0"
 #      - id: "jruby-1.7"
 #        display_name: jruby-1.7
 #        variables:
 #           RVM_RUBY: "jruby-1.7"
-      - id: "jruby-9.1"
-        display_name: jruby-9.1
-        variables:
-           RVM_RUBY: "jruby-9.1"
-      - id: "jruby-9.2"
-        display_name: jruby-9.2
-        variables:
-           RVM_RUBY: "jruby-9.2"
+#      - id: "jruby-9.1"
+#        display_name: jruby-9.1
+#        variables:
+#           RVM_RUBY: "jruby-9.1"
   - id: "os"
     display_name: OS
     values:
@@ -641,7 +499,7 @@ axes:
         display_name: "Ubuntu 12.04"
         run_on: ubuntu1204-test
 
-      - id: ubuntu1404
+      - id: ubuntu-14.04
         display_name: "Ubuntu 14.04"
         run_on: ubuntu1404-test
 
@@ -655,306 +513,26 @@ axes:
         display_name: Zlib
         variables:
            COMPRESSOR: "zlib"
-  - id: retry-reads
-    display_name: Retry Reads
-    values:
-      - id: no-retry-reads
-        display_name: No Retry Reads
-        variables:
-          RETRY_READS: 'false'
-  - id: retry-writes
-    display_name: Retry Writes
-    values:
-      - id: no-retry-writes
-        display_name: No Retry Writes
-        variables:
-          RETRY_WRITES: 'false'
-  - id: lint
-    display_name: Lint
-    values:
-      - id: on
-        display_name: On
-        variables:
-          LINT: '1'
-  - id: "as"
-    display_name: ActiveSupport
-    values:
-      - id: "as"
-        display_name: AS
-        variables:
-          WITH_ACTIVE_SUPPORT: true
-  - id: "single-mongos"
-    display_name: Single Mongos
-    values:
-      - id: "single-mongos"
-        display_name: Single Mongos
-        variables:
-          SINGLE_MONGOS: 'true'
-  - id: storage-engine
-    display_name: Storage Engine
-    values:
-      - id: mmapv1
-        display_name: MMAPv1
-        run_on: ubuntu1404-test
-        variables:
-          MMAPV1: 'true'
 
 
 buildvariants:
-#- matrix_name: "all-os-all-ruby-auth-and-ssl-standalone"
-#  matrix_spec: { auth-and-ssl: "auth-and-ssl", ruby: "*", mongodb-version: "*", topology: "standalone", os: "*" }
-#  display_name: "${version} ${topology} ${auth-and-ssl} ${ruby} ${os}"
+#- matrix_name: "all-os-all-ruby-auth-nossl-standalone"
+#  matrix_spec: { auth: "auth", ssl: "nossl", ruby: "*", mongodb-version: "*", topology: "standalone", os: "*" }
+#  display_name: "${version} ${topology} ${auth} ${ssl} ${ruby} ${os}"
 #  tasks:
 #     - name: "test"
--
-  matrix_name: "ruby-min"
-  matrix_spec:
-    auth-and-ssl: ["auth-and-ssl", "noauth-and-nossl"]
-    ruby: "ruby-1.9"
-    mongodb-version: "3.6"
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
+- matrix_name: "rhel70-all-mongodbs-all-rubies-all-topologies-all-auth-all-ssl"
+  matrix_spec: { auth: "*", ssl: "*", ruby: "*", mongodb-version: "*", topology: "*" }
+  display_name: "${mongodb-version} ${topology} ${auth} ${ssl} ${ruby}"
   run_on:
     - rhel70-small
   tasks:
      - name: "test"
 
--
-  matrix_name: "ruby-mid"
-  matrix_spec:
-    auth-and-ssl: "auth-and-ssl"
-    ruby: [ruby-2.2, ruby-2.3, ruby-2.4, ruby-2.5]
-    mongodb-version: "4.0"
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
+- matrix_name: "rhel70-latest-all-rubies-all-topologies-all-auth-all-ssl-compression"
+  matrix_spec: { auth: "*", ssl: "*", ruby: "*", mongodb-version: "4.0", topology: "*", compressor: 'zlib' }
+  display_name: "${compressor} ${topology} ${auth} ${ssl} ${ruby}"
   run_on:
     - rhel70-small
   tasks:
      - name: "test"
-
--
-  matrix_name: "mongo"
-  matrix_spec:
-    auth-and-ssl: ["auth-and-ssl", "noauth-and-nossl"]
-    ruby: "ruby-2.6"
-    mongodb-version: "*"
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "single-mongos"
-  matrix_spec:
-    auth-and-ssl: ["auth-and-ssl", "noauth-and-nossl"]
-    ruby: "ruby-2.6"
-    mongodb-version: ["4.2", latest]
-    topology: "sharded-cluster"
-    single-mongos: single-mongos
-  display_name: "${mongodb-version} ${topology} single-mongos ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "partial-auth-ssl"
-  matrix_spec:
-    auth-and-ssl: ["auth-and-nossl", "noauth-and-ssl"]
-    ruby: "ruby-2.6"
-    mongodb-version: ["4.0"]
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "no-retry-reads"
-  matrix_spec:
-    retry-reads: no-retry-reads
-    ruby: "ruby-2.6"
-    mongodb-version: ["4.0"]
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${retry-reads} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "no-retry-writes"
-  matrix_spec:
-    retry-writes: no-retry-writes
-    ruby: "ruby-2.6"
-    mongodb-version: ["4.0"]
-    topology: [replica-set, sharded-cluster]
-  display_name: "${mongodb-version} ${topology} ${retry-writes} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: mmapv1
-  matrix_spec:
-    ruby: "ruby-2.6"
-    mongodb-version: [3.6, 4.0]
-    topology: '*'
-    storage-engine: mmapv1
-  display_name: "${mongodb-version} ${topology} mmapv1 ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test-mlaunch"
-
--
-  matrix_name: "lint"
-  matrix_spec:
-    lint: on
-    ruby: "ruby-2.6"
-    mongodb-version: ["4.0", "4.2"]
-    topology: [replica-set, sharded-cluster]
-  display_name: "${mongodb-version} ${topology} ${lint} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "jruby-new"
-  matrix_spec:
-    auth-and-ssl: "auth-and-ssl"
-    ruby: "jruby-9.2"
-    mongodb-version: "4.0"
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "jruby-old"
-  matrix_spec:
-    auth-and-ssl: "noauth-and-nossl"
-    ruby: "jruby-9.1"
-    mongodb-version: "2.6"
-    topology: "*"
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "zlib-auth"
-  matrix_spec:
-    auth-and-ssl: "auth-and-ssl"
-    ruby: "ruby-2.6"
-    mongodb-version: "4.0"
-    topology: "*"
-    compressor: 'zlib'
-  display_name: "${compressor} ${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "zlib-noauth"
-  matrix_spec:
-    auth-and-ssl: "noauth-and-nossl"
-    ruby: "ruby-1.9"
-    mongodb-version: "3.6"
-    topology: "*"
-    compressor: 'zlib'
-  display_name: "${compressor} ${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "ruby-head"
-  matrix_spec: { auth-and-ssl: ["auth-and-ssl", "noauth-and-nossl"], ruby: ["ruby-head"], mongodb-version: "4.0", topology: "*" }
-  display_name: "${mongodb-version} ${topology} ${auth-and-ssl} ${ruby}"
-  run_on:
-    - ubuntu1604-test
-  tasks:
-     - name: "test"
-
-- matrix_name: "activesupport"
-  matrix_spec:
-    ruby: ruby-2.5
-    mongodb-version: '4.0'
-    topology: replica-set
-    as: as
-  display_name: "AS ${mongodb-version} ${topology} ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-     - name: "test"
-
--
-  matrix_name: "3.6-with-3.4-fcv"
-  matrix_spec:
-    fcv: '3.4'
-    ruby: ["ruby-2.5"]
-    mongodb-version: '3.6'
-    topology: replica-set
-  display_name: "3.6 Replica Set with 3.4 FCV"
-  run_on:
-    - rhel70-small
-  tasks:
-    - name: "test"
-
--
-  matrix_name: "local-tls"
-  matrix_spec:
-    ruby: "*"
-    mongodb-version: ['4.0', '4.2']
-    topology: standalone
-  display_name: "Local TLS ${mongodb-version} ${ruby}"
-  run_on:
-    - ubuntu1404-test
-  tasks:
-    - name: "local-tls-tests"
-
--
-  matrix_name: "enterprise-auth-tests-ubuntu"
-  matrix_spec:
-    auth-and-ssl: "auth-and-ssl"
-    # Ruby 2.6 and 2.4 segfault
-    ruby: ["ruby-2.5", "jruby-9.2", "jruby-9.1"]
-  display_name: "Enterprise Auth Ubuntu ${ruby}"
-  run_on:
-    - ubuntu1604-test
-  tasks:
-    - name: "enterprise-auth-tests"
-
--
-  matrix_name: "enterprise-auth-tests-rhel"
-  matrix_spec:
-    auth-and-ssl: "auth-and-ssl"
-    ruby: ["ruby-1.9"]
-  display_name: "Enterprise Auth RHEL ${ruby}"
-  run_on:
-    - rhel70-small
-  tasks:
-    - name: "enterprise-auth-tests"
-
-# Skipped due to segfaults: https://jira.mongodb.org/browse/RUBY-1534
-#-
-#  matrix_name: "enterprise-auth-tests-debian"
-#  matrix_spec:
-#    auth-and-ssl: "auth-and-ssl"
-#    ruby: ["ruby-2.5"]
-#  display_name: "Enterprise Auth Debian ${ruby}"
-#  run_on:
-#    - debian81-test
-#  tasks:
-#    - name: "enterprise-auth-tests"
